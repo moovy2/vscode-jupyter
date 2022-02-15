@@ -8,12 +8,7 @@ import * as path from 'path';
 import { CancellationToken } from 'vscode';
 import { traceWarning } from '../../../common/logger';
 
-import {
-    IPythonDaemonExecutionService,
-    IPythonExecutionFactory,
-    ObservableExecutionResult,
-    SpawnOptions
-} from '../../../common/process/types';
+import { IPythonExecutionFactory, ObservableExecutionResult, SpawnOptions } from '../../../common/process/types';
 import { IOutputChannel, IPathUtils, Product } from '../../../common/types';
 import { DataScience } from '../../../common/utils/localize';
 import { noop } from '../../../common/utils/misc';
@@ -21,7 +16,7 @@ import { EXTENSION_ROOT_DIR } from '../../../constants';
 import { IInterpreterService } from '../../../interpreter/contracts';
 import { PythonEnvironment } from '../../../pythonEnvironments/info';
 import { sendTelemetryEvent } from '../../../telemetry';
-import { JUPYTER_OUTPUT_CHANNEL, JupyterDaemonModule, Telemetry } from '../../constants';
+import { JUPYTER_OUTPUT_CHANNEL, Telemetry } from '../../constants';
 import { IJupyterInterpreterDependencyManager, IJupyterSubCommandExecutionService } from '../../types';
 import { JupyterServerInfo } from '../jupyterConnection';
 import { JupyterInstallError } from '../../errors/jupyterInstallError';
