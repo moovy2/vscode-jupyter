@@ -31,7 +31,6 @@ import { DataViewerChecker } from '../interactive-common/dataViewerChecker';
 import { IShowDataViewerFromVariablePanel } from '../interactive-common/interactiveWindowTypes';
 import { convertDebugProtocolVariableToIJupyterVariable } from '../jupyter/debuggerVariables';
 import { IKernelProvider } from '../jupyter/kernels/types';
-import { NotebookCreator } from '../notebook/creation/notebookCreator';
 import {
     ICodeWatcher,
     IDataScienceCodeLensProvider,
@@ -73,7 +72,6 @@ export class CommandRegistry implements IDisposable {
         @inject(IDataViewerFactory) private readonly dataViewerFactory: IDataViewerFactory,
         @inject(IJupyterServerUriStorage) private readonly serverUriStorage: IJupyterServerUriStorage,
         @inject(IJupyterVariables) @named(Identifiers.DEBUGGER_VARIABLES) private variableProvider: IJupyterVariables,
-        @inject(NotebookCreator) private readonly nativeNotebookCreator: NotebookCreator,
         @inject(IWorkspaceService) private readonly workspace: IWorkspaceService,
         @inject(IInteractiveWindowProvider) private readonly interactiveWindowProvider: IInteractiveWindowProvider,
         @inject(IDataScienceErrorHandler) private readonly errorHandler: IDataScienceErrorHandler,
@@ -105,7 +103,6 @@ export class CommandRegistry implements IDisposable {
         this.registerCommand(Commands.GotoNextCellInFile, this.gotoNextCellInFile);
         this.registerCommand(Commands.GotoPrevCellInFile, this.gotoPrevCellInFile);
         this.registerCommand(Commands.AddCellBelow, this.addCellBelow);
-        this.registerCommand(Commands.CreateNewNotebook, this.createNewNotebook);
         this.registerCommand(Commands.ViewJupyterOutput, this.viewJupyterOutput);
         this.registerCommand(Commands.LatestExtension, this.openPythonExtensionPage);
         this.registerCommand(Commands.EnableDebugLogging, this.enableDebugLogging);
@@ -492,10 +489,6 @@ export class CommandRegistry implements IDisposable {
         } else {
             return;
         }
-    }
-
-    private async createNewNotebook(): Promise<void> {
-        await this.nativeNotebookCreator.createNewNotebook();
     }
 
     private viewJupyterOutput() {
