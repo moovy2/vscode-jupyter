@@ -13,8 +13,8 @@
 
 ### Prerequisites
 
-1. [Node.js](https://nodejs.org/) 16.14.2
-2. [npm](https://www.npmjs.com/) 8.15.1
+1. [Node.js](https://nodejs.org/) 20.17.0
+2. [npm](https://www.npmjs.com/) 10.8.2
 3. [Python](https://www.python.org/) 3.6 or later
 4. Windows, macOS, or Linux
 5. [Visual Studio Code](https://code.visualstudio.com/)
@@ -23,7 +23,6 @@
     - [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)
     - [EditorConfig for VS Code](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
     - [Python Extension for VS Code](https://marketplace.visualstudio.com/items?itemName=ms-python.python)
-    - [TypeScript + Webpack Problem Matchers](https://marketplace.visualstudio.com/items?itemName=amodio.tsl-problem-matcher)
 
 ### Setup
 
@@ -40,28 +39,31 @@ source .venv/bin/activate
 .venv\Scripts\activate
 # The Python code in the extension is formatted using Black.
 python -m pip install black
-# The Python code required in the extension
-python -m pip --disable-pip-version-check install -t ./pythonFiles/lib/python --no-cache-dir --implementation py --no-deps --upgrade -r ./requirements.txt
 ```
 
 ### Incremental Build
 
-Run the `Compile`, `Compile Web Views`, and `Compile Web Extension` build Tasks from the [Run Build Task...](https://code.visualstudio.com/docs/editor/tasks) command picker (short cut `CTRL+SHIFT+B` or `⇧⌘B`). This will leave build tasks running in the background and which will re-run as files are edited and saved. You can see the output from either task in the Terminal panel (use the selector to choose which output to look at).
+Run the `watch` build Tasks from the [Run Build Task...](https://code.visualstudio.com/docs/editor/tasks) command picker (short cut `CTRL+SHIFT+B` or `⇧⌘B`). This will leave build tasks running in the background and which will re-run as files are edited and saved. You can see the output from either task in the Terminal panel (use the selector to choose which output to look at).
 
 You can also compile from the command-line. For a full compile you can use:
 
 ```shell
-npx gulp prePublishNonBundleNLS
+npx gulp prePublishNonBundle
 ```
 
-For incremental builds you can use the following commands depending on your needs:
+For incremental builds it is recommended you use the `watch` build task (for better integration with VS Code).
+Optionally you can use the following commands depending on your needs:
 
 ```shell
+# This will compile everything, but only watch for changes to the desktop bundle.
+# Note: Its advisable to use the `watch` task instead of this one (for integration with VS Code, e.g. view errors in problems window).
 npm run compile
-npm run compile-webviews-watch # For Interactive Window, Plot Viewer, Data Frame Viewer, and Notebooks (not the one based on VS Code)
+# This watches changes to all files, webviews, web version of extension, node version of extension, etc
+# This can be resource intensive, as there are a number of bundles created, thus requiring monitoring of files for each of these numerous bundles.
+npm run compile-watch-all
 ```
 
-Sometimes you will need to run `npm run clean` and even `rm -r out`.
+Sometimes you will need to run `npm run clean` and even `rm -r out dist`.
 This is especially true if you have added or removed files.
 
 ### Errors and Warnings
@@ -109,7 +111,7 @@ Note: Integration tests are those in files with extension `*.vscode.test*.ts`.
 
 1. Make sure you have compiled all code (done automatically when using incremental building)
 1. Some of the tests require specific virtual environments. Run the 'src/test/datascience/setupTestEnvs.cmd` (or equivalent) to create them.
-1. For the linters and formatters tests to pass successfully, you will need to have those corresponding Python libraries installed locally by using the `./requirements.txt` and `build/test-requirements.txt` files
+1. For the linters and formatters tests to pass successfully, you will need to have those corresponding Python libraries installed locally by using the `build/test-requirements.txt` file
 1. Run the tests via `npm run` or the Debugger launch options (you can "Start Without Debugging").
 
 You can also run the tests from the command-line (after compiling):
@@ -230,7 +232,7 @@ Here's an example of a typical workflow:
 1. `npm ci`
 1. `npm run clean`
 1. Start VS code Insiders root
-1. CTRL+SHIFT+B and build `Compile Web Views` and `Compile`
+1. CTRL+SHIFT+B (run the task `compile`)
 1. Make code changes
 1. Write and [run](https://github.com/microsoft/vscode-jupyter/blob/29c4be79f64df1858692321b43c3079bb77bdd69/.vscode/launch.json#L252) unit tests if appropriate
 1. Test with [`Extension`](https://github.com/microsoft/vscode-jupyter/blob/29c4be79f64df1858692321b43c3079bb77bdd69/.vscode/launch.json#L6) launch task
@@ -302,10 +304,9 @@ To create a release _build_, follow the steps outlined in the [release plan](htt
 Steps to build the extension on your machine once you've cloned the repo:
 
 ```bash
-> npm install -g vsce
+> npm install -g @vscode/vsce
 # Perform the next steps in the vscode-jupyter folder.
 > npm ci
-> python3 -m pip --disable-pip-version-check install -t ./pythonFiles/lib/python --no-cache-dir --implementation py --no-deps --upgrade -r requirements.txt --no-user
 > npm run clean
 > npm run package # This step takes around 10 minutes.
 ```

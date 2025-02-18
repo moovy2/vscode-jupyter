@@ -1,12 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { anything, instance, mock, when } from 'ts-mockito';
+import { instance, mock, when } from 'ts-mockito';
 /* eslint-disable no-invalid-this, @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any */
 
 import * as vscode from 'vscode';
+import { format } from '../platform/common/helpers';
 import { noop } from '../platform/common/utils/misc';
 import * as vscodeMocks from './mocks/vsc';
 import { vscMockTelemetryReporter } from './mocks/vsc/telemetryReporter';
@@ -20,7 +19,7 @@ const originalLoad = Module._load;
 
 function generateMock<K extends keyof VSCode>(name: K): void {
     const mockedObj = mock<VSCode[K]>();
-    (mockedVSCode as any)[name] = instance(mockedObj);
+    mockedVSCode[name] = instance(mockedObj);
     mockedVSCodeNamespaces[name] = mockedObj;
 }
 
@@ -57,24 +56,30 @@ class MockClipboard {
         this.text = value;
     }
 }
-export function initialize() {
+
+export function resetVSCodeMocks() {
     generateMock('workspace');
     generateMock('window');
     generateMock('languages');
     generateMock('env');
     generateMock('debug');
     generateMock('scm');
+    generateMock('env');
     generateMock('notebooks');
+    generateMock('commands');
+    generateMock('extensions');
 
-    const commands = new MockCommands();
-    (mockedVSCode as any).commands = commands;
-    mockedVSCodeNamespaces.commands = commands as any;
     when(mockedVSCodeNamespaces.workspace.notebookDocuments).thenReturn([]);
     when(mockedVSCodeNamespaces.window.visibleNotebookEditors).thenReturn([]);
+    when(mockedVSCodeNamespaces.window.activeTextEditor).thenReturn(undefined);
     // Use mock clipboard fo testing purposes.
     const clipboard = new MockClipboard();
     when(mockedVSCodeNamespaces.env.clipboard).thenReturn(clipboard);
     when(mockedVSCodeNamespaces.env.appName).thenReturn('Insider');
+}
+
+export function initialize() {
+    resetVSCodeMocks();
 
     // When upgrading to npm 9-10, this might have to change, as we could have explicit imports (named imports).
     Module._load = function (request: any, _parent: any) {
@@ -92,7 +97,34 @@ export function initialize() {
         return originalLoad.apply(this, arguments);
     };
 }
-
+mockedVSCode.l10n = {
+    bundle: undefined,
+    t: (arg1: string | { message: string; args?: string[] | Record<string, string> }, ...restOfArguments: string[]) => {
+        if (typeof arg1 === 'string') {
+            if (restOfArguments.length === 0) {
+                return arg1;
+            }
+            if (typeof restOfArguments === 'object' && !Array.isArray(restOfArguments)) {
+                throw new Error('Records for l10n.t() are not supported in the mock');
+            }
+            return format(arg1, ...restOfArguments);
+        }
+        if (typeof arg1 === 'object') {
+            const message = arg1.message;
+            const args = arg1.args || [];
+            if (typeof args === 'object' && !Array.isArray(args)) {
+                throw new Error('Records for l10n.t() are not supported in the mock');
+            }
+            if (args.length === 0) {
+                return message;
+            }
+            return format(message, ...args);
+        }
+        return arg1;
+    },
+    uri: undefined
+} as any;
+mockedVSCode.MarkdownString = vscodeMocks.vscMock.MarkdownString;
 mockedVSCode.MarkdownString = vscodeMocks.vscMock.MarkdownString;
 mockedVSCode.Hover = vscodeMocks.vscMock.Hover;
 mockedVSCode.Disposable = vscodeMocks.vscMock.Disposable as any;
@@ -142,25 +174,17 @@ mockedVSCode.ThemeIcon = vscodeMocks.vscMockExtHostedTypes.ThemeIcon;
 mockedVSCode.ThemeColor = vscodeMocks.vscMockExtHostedTypes.ThemeColor;
 mockedVSCode.FileSystemError = vscodeMocks.vscMockExtHostedTypes.FileSystemError;
 mockedVSCode.FileDecoration = vscodeMocks.vscMockExtHostedTypes.FileDecoration;
+mockedVSCode.PortAutoForwardAction = vscodeMocks.vscMockExtHostedTypes.PortAutoForwardAction;
+mockedVSCode.PortAttributes = vscodeMocks.vscMockExtHostedTypes.PortAttributes;
+mockedVSCode.NotebookRendererScript = vscodeMocks.vscMockExtHostedTypes.NotebookRendererScript;
+mockedVSCode.NotebookEdit = vscodeMocks.vscMockExtHostedTypes.NotebookEdit;
+mockedVSCode.NotebookRange = vscodeMocks.vscMockExtHostedTypes.NotebookRange;
+mockedVSCode.QuickPickItemKind = vscodeMocks.vscMockExtHostedTypes.QuickPickItemKind;
+(mockedVSCode as any).LogLevel = vscodeMocks.vscMockExtHostedTypes.LogLevel;
+(mockedVSCode.NotebookCellData as any) = vscodeMocks.vscMockExtHostedTypes.NotebookCellData;
 (mockedVSCode as any).NotebookCellKind = vscodeMocks.vscMockExtHostedTypes.NotebookCellKind;
-(mockedVSCode as any).NotebookRunState = vscodeMocks.vscMockExtHostedTypes.NotebookRunState;
 (mockedVSCode as any).NotebookCellRunState = vscodeMocks.vscMockExtHostedTypes.NotebookCellRunState;
 (mockedVSCode as any).NotebookControllerAffinity = vscodeMocks.vscMockExtHostedTypes.NotebookControllerAffinity;
-(mockedVSCode as any).NotebookCellMetadata = vscodeMocks.vscMockExtHostedTypes.NotebookCellMetadata;
-(mockedVSCode as any).NotebookCellMetadata = vscodeMocks.vscMockExtHostedTypes.NotebookCellMetadata;
-(mockedVSCode as any).NotebookCellOutput = vscodeMocks.vscMockExtHostedTypes.NotebookCellOutput;
+mockedVSCode.NotebookCellOutput = vscodeMocks.vscMockExtHostedTypes.NotebookCellOutput;
 (mockedVSCode as any).NotebookCellOutputItem = vscodeMocks.vscMockExtHostedTypes.NotebookCellOutputItem;
 (mockedVSCode as any).NotebookCellExecutionState = vscodeMocks.vscMockExtHostedTypes.NotebookCellExecutionState;
-(mockedVSCode as any).notebook = { notebookDocuments: [] };
-mockedVSCode.workspace;
-// This API is used in src/telemetry/telemetry.ts
-const extensions = mock<typeof vscode.extensions>();
-when(extensions.all).thenReturn([]);
-const extension = mock<vscode.Extension<any>>();
-const packageJson = mock<any>();
-const contributes = mock<any>();
-when(extension.packageJSON).thenReturn(instance(packageJson));
-when(packageJson.contributes).thenReturn(instance(contributes));
-when(contributes.debuggers).thenReturn([{ aiKey: '' }]);
-when(extensions.getExtension(anything())).thenReturn(instance(extension));
-mockedVSCode.extensions = instance(extensions);

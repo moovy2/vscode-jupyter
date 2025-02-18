@@ -4,7 +4,7 @@
 import { assert } from 'chai';
 import * as sinon from 'sinon';
 import * as vscode from 'vscode';
-import { traceInfo } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { getDisplayPath, getFilePath } from '../../platform/common/platform/fs-paths';
 import { IDisposable } from '../../platform/common/types';
 import { InteractiveWindowProvider } from '../../interactive-window/interactiveWindowProvider';
@@ -38,11 +38,11 @@ import { areInterpreterPathsSame } from '../../platform/pythonEnvironments/info/
 import { IPythonApiProvider } from '../../platform/api/types';
 import { isEqual } from '../../platform/vscode-path/resources';
 import { PythonEnvironment } from '../../platform/pythonEnvironments/info';
-import { IVSCodeNotebook } from '../../platform/common/application/types';
 import { Commands } from '../../platform/common/constants';
-import { IControllerSelection } from '../../notebooks/controllers/types';
+import { IControllerRegistration } from '../../notebooks/controllers/types';
+import { getCachedEnvironments } from '../../platform/interpreter/helpers';
 
-suite(`Interactive window Execution`, async function () {
+suite(`Interactive window Execution @iw`, async function () {
     this.timeout(120_000);
     let api: IExtensionTestApi;
     const disposables: IDisposable[] = [];
@@ -52,17 +52,17 @@ suite(`Interactive window Execution`, async function () {
     let pythonApiProvider: IPythonApiProvider;
     let originalActiveInterpreter: PythonEnvironment | undefined;
     setup(async function () {
-        traceInfo(`Start Test ${this.currentTest?.title}`);
+        logger.info(`Start Test ${this.currentTest?.title}`);
         api = await initialize();
         if (IS_REMOTE_NATIVE_TEST()) {
             await startJupyterServer();
         }
         interactiveWindowProvider = api.serviceManager.get(IInteractiveWindowProvider);
         pythonApiProvider = api.serviceManager.get<IPythonApiProvider>(IPythonApiProvider);
-        traceInfo(`Start Test (completed) ${this.currentTest?.title}`);
+        logger.info(`Start Test (completed) ${this.currentTest?.title}`);
     });
     teardown(async function () {
-        traceInfo(`Ended Test ${this.currentTest?.title}`);
+        logger.info(`Ended Test ${this.currentTest?.title}`);
         await vscode.commands.executeCommand('python.clearWorkspaceInterpreter');
         if (this.currentTest?.isFailed()) {
             // For a flaky interrupt test.
@@ -75,28 +75,35 @@ suite(`Interactive window Execution`, async function () {
         const pythonApi = await pythonApiProvider.getNewApi();
         await pythonApi?.environments.refreshEnvironments({ forceRefresh: true });
         const interpreterService = api.serviceContainer.get<IInterpreterService>(IInterpreterService);
-        const interpreters = interpreterService.resolvedEnvironments;
         await waitForCondition(
             () => {
-                const venvNoKernelInterpreter = interpreters.find((i) => getFilePath(i.uri).includes('.venvnokernel'));
-                const venvKernelInterpreter = interpreters.find((i) => getFilePath(i.uri).includes('.venvkernel'));
+                const venvNoKernelInterpreter = getCachedEnvironments().find((i) =>
+                    getFilePath(i.executable.uri).includes('.venvnokernel')
+                );
+                const venvKernelInterpreter = getCachedEnvironments().find((i) =>
+                    getFilePath(i.executable.uri).includes('.venvkernel')
+                );
                 return venvNoKernelInterpreter && venvKernelInterpreter ? true : false;
             },
             defaultNotebookTestTimeout,
             'Waiting for interpreters to be discovered'
         );
-        const venvNoKernelInterpreter = interpreters.find((i) => getFilePath(i.uri).includes('.venvnokernel'));
-        const venvKernelInterpreter = interpreters.find((i) => getFilePath(i.uri).includes('.venvkernel'));
+        const venvNoKernelInterpreter = getCachedEnvironments().find((i) =>
+            getFilePath(i.executable.uri).includes('.venvnokernel')
+        );
+        const venvKernelInterpreter = getCachedEnvironments().find((i) =>
+            getFilePath(i.executable.uri).includes('.venvkernel')
+        );
 
         if (!venvNoKernelInterpreter || !venvKernelInterpreter) {
             throw new Error(
-                `Unable to find matching kernels. List of kernels is ${interpreters
-                    .map((i) => getFilePath(i.uri))
+                `Unable to find matching kernels. List of kernels is ${getCachedEnvironments()
+                    .map((i) => getFilePath(i.executable.uri))
                     .join('\n')}`
             );
         }
-        venNoKernelPath = venvNoKernelInterpreter.uri;
-        venvKernelPath = venvKernelInterpreter.uri;
+        venNoKernelPath = venvNoKernelInterpreter.executable.uri!;
+        venvKernelPath = venvKernelInterpreter.executable.uri!;
         originalActiveInterpreter = await interpreterService.getActiveInterpreter();
 
         // No kernel should not have ipykernel in it yet, but we need two, so install it.
@@ -141,9 +148,8 @@ suite(`Interactive window Execution`, async function () {
             'open file Prompt not displayed'
         );
 
-        const vscodeNotebook = api.serviceContainer.get<IVSCodeNotebook>(IVSCodeNotebook);
-        const document = await vscodeNotebook.openNotebookDocument(notebookFile);
-        let editor = await vscodeNotebook.showNotebookDocument(document, { preserveFocus: false });
+        const document = await vscode.workspace.openNotebookDocument(notebookFile);
+        let editor = await vscode.window.showNotebookDocument(document, { preserveFocus: false });
 
         const cells = editor.notebook.getCells();
         assert.strictEqual(cells?.length, 3);
@@ -169,15 +175,17 @@ suite(`Interactive window Execution`, async function () {
             let notebookDocument = vscode.workspace.notebookDocuments.find(
                 (doc) => doc.uri.toString() === activeInteractiveWindow?.notebookUri?.toString()
             )!;
-            const notebookControllerManager = api.serviceManager.get<IControllerSelection>(IControllerSelection);
+            const notebookControllerManager = api.serviceManager.get<IControllerRegistration>(IControllerRegistration);
             // Ensure we picked up the active interpreter for use as the kernel
 
             let controller = notebookDocument ? notebookControllerManager.getSelected(notebookDocument) : undefined;
             assert.ok(
                 areInterpreterPathsSame(controller?.connection.interpreter?.uri, activeInterpreter?.uri),
-                `Controller does not match active interpreter for ${getDisplayPath(notebookDocument?.uri)} - active: ${
-                    activeInterpreter?.uri
-                } controller: ${controller?.connection.interpreter?.uri}`
+                `Controller does not match active interpreter for ${getDisplayPath(
+                    notebookDocument?.uri
+                )} - active: ${activeInterpreter?.uri} controller: ${getDisplayPath(
+                    controller?.connection?.interpreter?.uri
+                )}`
             );
 
             // Now switch the active interpreter to the other path

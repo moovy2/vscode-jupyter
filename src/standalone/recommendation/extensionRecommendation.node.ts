@@ -2,11 +2,10 @@
 // Licensed under the MIT License.
 
 import { inject, injectable, named } from 'inversify';
-import { Memento, NotebookDocument } from 'vscode';
+import { Memento, NotebookDocument, commands, window, workspace } from 'vscode';
 import { IExtensionSyncActivationService } from '../../platform/activation/types';
-import { IApplicationShell, ICommandManager, IVSCodeNotebook } from '../../platform/common/application/types';
-import { disposeAllDisposables } from '../../platform/common/helpers';
-import { GLOBAL_MEMENTO, IDisposable, IDisposableRegistry, IExtensions, IMemento } from '../../platform/common/types';
+import { dispose } from '../../platform/common/utils/lifecycle';
+import { GLOBAL_MEMENTO, IDisposable, IDisposableRegistry, IMemento } from '../../platform/common/types';
 import { Common, DataScience } from '../../platform/common/utils/localize';
 import { noop } from '../../platform/common/utils/misc';
 import { sendTelemetryEvent } from '../../telemetry';
@@ -16,8 +15,9 @@ import {
     getLanguageInNotebookMetadata,
     isPythonKernelConnection
 } from '../../kernels/helpers';
-import { IControllerSelection, IVSCodeNotebookController } from '../../notebooks/controllers/types';
+import { IControllerRegistration, IVSCodeNotebookController } from '../../notebooks/controllers/types';
 import { getNotebookMetadata, isJupyterNotebook } from '../../platform/common/utils';
+import { extensions } from 'vscode';
 
 const mementoKeyToNeverPromptExtensionAgain = 'JVSC_NEVER_PROMPT_EXTENSIONS_LIST';
 const knownExtensionsToRecommend = new Map<string, { displayName: string; extensionLink: string }>([
@@ -46,22 +46,18 @@ export class ExtensionRecommendationService implements IExtensionSyncActivationS
     private readonly disposables: IDisposable[] = [];
     private recommendedInSession = new Set<string>();
     constructor(
-        @inject(IVSCodeNotebook) private readonly notebook: IVSCodeNotebook,
-        @inject(IControllerSelection) private readonly controllerManager: IControllerSelection,
+        @inject(IControllerRegistration) private readonly controllerManager: IControllerRegistration,
         @inject(IDisposableRegistry) disposables: IDisposableRegistry,
-        @inject(IMemento) @named(GLOBAL_MEMENTO) private readonly globalMemento: Memento,
-        @inject(IApplicationShell) private readonly appShell: IApplicationShell,
-        @inject(IExtensions) private readonly extensions: IExtensions,
-        @inject(ICommandManager) private readonly commandManager: ICommandManager
+        @inject(IMemento) @named(GLOBAL_MEMENTO) private readonly globalMemento: Memento
     ) {
         disposables.push(this);
     }
     public dispose() {
-        disposeAllDisposables(this.disposables);
+        dispose(this.disposables);
     }
 
     public activate() {
-        this.notebook.onDidOpenNotebookDocument(this.onDidOpenNotebookDocument, this, this.disposables);
+        workspace.onDidOpenNotebookDocument(this.onDidOpenNotebookDocument, this, this.disposables);
         this.controllerManager.onControllerSelected(this.onNotebookControllerSelected, this, this.disposables);
     }
 
@@ -92,7 +88,7 @@ export class ExtensionRecommendationService implements IExtensionSyncActivationS
     }
     private async recommendExtensionForLanguage(language: string) {
         const extensionId = extensionsThatSupportJupyterKernelLanguages.get(language.toLowerCase());
-        if (!extensionId || this.extensions.getExtension(extensionId)) {
+        if (!extensionId || extensions.getExtension(extensionId)) {
             return;
         }
         const extensionInfo = knownExtensionsToRecommend.get(extensionId);
@@ -106,28 +102,28 @@ export class ExtensionRecommendationService implements IExtensionSyncActivationS
             return;
         }
         this.recommendedInSession.add(extensionId);
-        const message = DataScience.recommendExtensionForNotebookLanguage().format(
+        const message = DataScience.recommendExtensionForNotebookLanguage(
             `[${extensionInfo.displayName}](${extensionInfo.extensionLink})`,
             language
         );
         sendTelemetryEvent(Telemetry.RecommendExtension, undefined, { extensionId, action: 'displayed' });
-        const selection = await this.appShell.showInformationMessage(
+        const selection = await window.showInformationMessage(
             message,
-            Common.bannerLabelYes(),
-            Common.bannerLabelNo(),
-            Common.doNotShowAgain()
+            Common.bannerLabelYes,
+            Common.bannerLabelNo,
+            Common.doNotShowAgain
         );
         switch (selection) {
-            case Common.bannerLabelYes(): {
+            case Common.bannerLabelYes: {
                 sendTelemetryEvent(Telemetry.RecommendExtension, undefined, { extensionId, action: 'ok' });
-                this.commandManager.executeCommand('extension.open', extensionId).then(noop, noop);
+                commands.executeCommand('extension.open', extensionId).then(noop, noop);
                 break;
             }
-            case Common.bannerLabelNo(): {
+            case Common.bannerLabelNo: {
                 sendTelemetryEvent(Telemetry.RecommendExtension, undefined, { extensionId, action: 'cancel' });
                 break;
             }
-            case Common.doNotShowAgain(): {
+            case Common.doNotShowAgain: {
                 sendTelemetryEvent(Telemetry.RecommendExtension, undefined, { extensionId, action: 'doNotShowAgain' });
                 const list = this.globalMemento.get<string[]>(mementoKeyToNeverPromptExtensionAgain, []);
                 if (!list.includes(extensionId)) {

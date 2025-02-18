@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { inject, injectable, optional } from 'inversify';
 import {
     CodeLens,
@@ -18,87 +16,64 @@ import {
     Position,
     ViewColumn,
     workspace,
-    WorkspaceEdit
+    WorkspaceEdit,
+    window
 } from 'vscode';
 import { IKernelProvider, KernelConnectionMetadata } from '../../kernels/types';
 import { ICommandNameArgumentTypeMapping } from '../../commands';
-import {
-    IApplicationShell,
-    IClipboard,
-    ICommandManager,
-    IDebugService,
-    IDocumentManager,
-    IVSCodeNotebook,
-    IWorkspaceService
-} from '../../platform/common/application/types';
-
+import { IDebugService } from '../../platform/common/application/types';
 import { IConfigurationService, IDisposable, IDisposableRegistry } from '../../platform/common/types';
 import { DataScience } from '../../platform/common/utils/localize';
 import { isUri, noop } from '../../platform/common/utils/misc';
 import { capturePerfTelemetry, captureUsageTelemetry } from '../../telemetry';
-import {
-    Commands,
-    CommandSource,
-    JVSC_EXTENSION_ID,
-    PYTHON_LANGUAGE,
-    Telemetry
-} from '../../platform/common/constants';
+import { Commands, CommandSource, PYTHON_LANGUAGE, Telemetry } from '../../platform/common/constants';
 import { IDataScienceCodeLensProvider, ICodeWatcher } from '../editor-integration/types';
 import { IInteractiveWindowProvider } from '../types';
 import * as urlPath from '../../platform/vscode-path/resources';
 import { getDisplayPath, getFilePath } from '../../platform/common/platform/fs-paths';
-import { IExtensionSingleActivationService } from '../../platform/activation/types';
-import { ExportFormat, IExportDialog, IFileConverter } from '../../notebooks/export/types';
+import { IExtensionSyncActivationService } from '../../platform/activation/types';
+import { ExportFormat, IFileConverter } from '../../notebooks/export/types';
 import { openAndShowNotebook } from '../../platform/common/utils/notebooks';
 import { JupyterInstallError } from '../../platform/errors/jupyterInstallError';
-import { traceError, traceInfo, traceVerbose } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { generateCellsFromDocument } from '../editor-integration/cellFactory';
 import { IDataScienceErrorHandler } from '../../kernels/errors/types';
 import { INotebookEditorProvider } from '../../notebooks/types';
-import { INotebookExporter, IJupyterExecution } from '../../kernels/jupyter/types';
+import { IJupyterServerHelper, INotebookExporter } from '../../kernels/jupyter/types';
 import { IFileSystem } from '../../platform/common/platform/types';
-import { IControllerPreferredService } from '../../notebooks/controllers/types';
 import { StatusProvider } from './statusProvider';
+import { ExportDialog } from '../../notebooks/export/exportDialog';
 
 /**
  * Class that registers command handlers for interactive window commands.
  */
 @injectable()
-export class CommandRegistry implements IDisposable, IExtensionSingleActivationService {
+export class CommandRegistry implements IDisposable, IExtensionSyncActivationService {
     private readonly statusProvider: StatusProvider;
     constructor(
         @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry,
         @inject(INotebookExporter) @optional() private jupyterExporter: INotebookExporter | undefined,
-        @inject(IJupyterExecution) private jupyterExecution: IJupyterExecution,
-        @inject(IDocumentManager) private documentManager: IDocumentManager,
-        @inject(IApplicationShell) private applicationShell: IApplicationShell,
+        @inject(IJupyterServerHelper) @optional() private jupyterServerHelper: IJupyterServerHelper | undefined,
         @inject(IFileSystem) private fileSystem: IFileSystem,
         @inject(IConfigurationService) private configuration: IConfigurationService,
         @inject(IDataScienceCodeLensProvider)
         @optional()
         private dataScienceCodeLensProvider: IDataScienceCodeLensProvider | undefined,
-        @inject(ICommandManager) private readonly commandManager: ICommandManager,
         @inject(IDebugService) @optional() private debugService: IDebugService | undefined,
         @inject(IConfigurationService) private configService: IConfigurationService,
-        @inject(IApplicationShell) private appShell: IApplicationShell,
-        @inject(IWorkspaceService) private readonly workspace: IWorkspaceService,
         @inject(IInteractiveWindowProvider)
         private readonly interactiveWindowProvider: IInteractiveWindowProvider,
         @inject(IKernelProvider) private readonly kernelProvider: IKernelProvider,
         @inject(IDataScienceErrorHandler) private dataScienceErrorHandler: IDataScienceErrorHandler,
         @inject(INotebookEditorProvider) protected ipynbProvider: INotebookEditorProvider,
-        @inject(IFileConverter) private fileConverter: IFileConverter,
-        @inject(IExportDialog) private exportDialog: IExportDialog,
-        @inject(IClipboard) private clipboard: IClipboard,
-        @inject(IVSCodeNotebook) private notebook: IVSCodeNotebook,
-        @inject(IControllerPreferredService) private controllerPreferredService: IControllerPreferredService
+        @inject(IFileConverter) private fileConverter: IFileConverter
     ) {
-        this.statusProvider = new StatusProvider(applicationShell);
-        if (!this.workspace.isTrusted) {
-            this.workspace.onDidGrantWorkspaceTrust(this.registerCommandsIfTrusted, this, this.disposables);
+        this.statusProvider = new StatusProvider();
+        if (!workspace.isTrusted) {
+            workspace.onDidGrantWorkspaceTrust(this.registerCommandsIfTrusted, this, this.disposables);
         }
     }
-    public async activate(): Promise<void> {
+    public activate() {
         this.registerCommandsIfTrusted();
         this.registerCommand(Commands.InsertCellBelowPosition, this.insertCellBelowPosition);
         this.registerCommand(Commands.InsertCellBelow, this.insertCellBelow);
@@ -117,8 +92,6 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
         this.registerCommand(Commands.AddCellBelow, this.addCellBelow);
         this.registerCommand(Commands.CreateNewNotebook, this.createNewNotebook);
         this.registerCommand(Commands.LatestExtension, this.openPythonExtensionPage);
-        this.registerCommand(Commands.EnableDebugLogging, this.enableDebugLogging);
-        this.registerCommand(Commands.ResetLoggingLevel, this.resetLoggingLevel);
         this.registerCommand(
             Commands.EnableLoadingWidgetsFrom3rdPartySource,
             this.enableLoadingWidgetScriptsFromThirdParty
@@ -150,14 +123,14 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
                 });
             }
         );
-        this.commandManager.registerCommand(
+        commands.registerCommand(
             Commands.ExportFileAsNotebook,
             (file?: Uri, _cmdSource: CommandSource = CommandSource.commandPalette) => {
                 return this.listenForErrors(() => {
                     if (file) {
                         return this.exportFile(file);
                     } else {
-                        const activeEditor = this.documentManager.activeTextEditor;
+                        const activeEditor = window.activeTextEditor;
                         if (activeEditor && activeEditor.document.languageId === PYTHON_LANGUAGE) {
                             return this.exportFile(activeEditor.document.uri);
                         }
@@ -174,7 +147,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
                     if (file) {
                         return this.exportFileAndOutput(file);
                     } else {
-                        const activeEditor = this.documentManager.activeTextEditor;
+                        const activeEditor = window.activeTextEditor;
                         if (activeEditor && activeEditor.document.languageId === PYTHON_LANGUAGE) {
                             return this.exportFileAndOutput(activeEditor.document.uri);
                         }
@@ -200,13 +173,13 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
         this.registerCommand(Commands.ScrollToCell, (file: Uri, id: string) => this.scrollToCell(file, id));
         this.registerCommand(Commands.InteractiveClearAll, this.clearAllCellsInInteractiveWindow);
         this.registerCommand(Commands.InteractiveGoToCode, this.goToCodeInInteractiveWindow);
-        this.commandManager.registerCommand(Commands.InteractiveCopyCell, this.copyCellInInteractiveWindow);
+        this.registerCommand(Commands.InteractiveCopyCell, this.copyCellInInteractiveWindow);
     }
     public dispose() {
         this.disposables.forEach((d) => d.dispose());
     }
     private registerCommandsIfTrusted() {
-        if (!this.workspace.isTrusted) {
+        if (!workspace.isTrusted) {
             return;
         }
         this.registerCommand(Commands.RunAllCells, this.runAllCells);
@@ -238,37 +211,21 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
         U extends ICommandNameArgumentTypeMapping[E]
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
     >(command: E, callback: (...args: U) => any) {
-        const disposable = this.commandManager.registerCommand(command, callback, this);
+        const disposable = commands.registerCommand(command, callback, this);
         this.disposables.push(disposable);
     }
 
     private getCodeWatcher(file: Uri | undefined): ICodeWatcher | undefined {
         if (file && this.dataScienceCodeLensProvider) {
-            const possibleDocuments = this.documentManager.textDocuments.filter((d) => urlPath.isEqual(d.uri, file));
+            const possibleDocuments = workspace.textDocuments.filter((d) => urlPath.isEqual(d.uri, file));
             if (possibleDocuments && possibleDocuments.length === 1) {
                 return this.dataScienceCodeLensProvider.getCodeWatcher(possibleDocuments[0]);
             } else if (possibleDocuments && possibleDocuments.length > 1) {
-                throw new Error(DataScience.documentMismatch().format(getFilePath(file)));
+                throw new Error(DataScience.documentMismatch(getFilePath(file)));
             }
         }
 
         return undefined;
-    }
-
-    private async enableDebugLogging() {
-        const previousValue = this.configService.getSettings().logging.level;
-        if (previousValue !== 'debug') {
-            await this.configService.updateSetting('logging.level', 'debug', undefined, ConfigurationTarget.Global);
-            this.commandManager.executeCommand('jupyter.reloadVSCode', DataScience.reloadRequired()).then(noop, noop);
-        }
-    }
-
-    private async resetLoggingLevel() {
-        const previousValue = this.configService.getSettings().logging.level;
-        if (previousValue !== 'error') {
-            await this.configService.updateSetting('logging.level', 'error', undefined, ConfigurationTarget.Global);
-            this.commandManager.executeCommand('jupyter.reloadVSCode', DataScience.reloadRequired()).then(noop, noop);
-        }
     }
 
     private async enableLoadingWidgetScriptsFromThirdParty() {
@@ -354,7 +311,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
 
     private async runToLine(): Promise<void> {
         const activeCodeWatcher = this.getCurrentCodeWatcher();
-        const textEditor = this.documentManager.activeTextEditor;
+        const textEditor = window.activeTextEditor;
 
         if (activeCodeWatcher && textEditor && textEditor.selection) {
             return activeCodeWatcher.runToLine(textEditor.selection.start.line);
@@ -363,7 +320,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
 
     private async runFromLine(): Promise<void> {
         const activeCodeWatcher = this.getCurrentCodeWatcher();
-        const textEditor = this.documentManager.activeTextEditor;
+        const textEditor = window.activeTextEditor;
 
         if (activeCodeWatcher && textEditor && textEditor.selection) {
             return activeCodeWatcher.runFromLine(textEditor.selection.start.line);
@@ -392,7 +349,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
         const activeCodeWatcher = this.getCurrentCodeWatcher();
         if (activeCodeWatcher) {
             return activeCodeWatcher.runSelectionOrLine(
-                this.documentManager.activeTextEditor,
+                window.activeTextEditor,
                 // If this is a URI, the runSelectionOrLine is not expecting a URI, so act like nothing was sent.
                 isUri(textOrUri) ? undefined : textOrUri
             );
@@ -421,7 +378,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     private async debugStepOver(): Promise<void> {
         // Make sure that we are in debug mode
         if (this.debugService?.activeDebugSession) {
-            this.commandManager.executeCommand('workbench.action.debug.stepOver').then(noop, noop);
+            commands.executeCommand('workbench.action.debug.stepOver').then(noop, noop);
         }
     }
 
@@ -430,17 +387,17 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
         // Make sure that we are in debug mode
         if (this.debugService?.activeDebugSession && this.interactiveWindowProvider) {
             // Attempt to get the interactive window for this file
-            const iw = this.interactiveWindowProvider.windows.find((w) => w.owner?.toString() == uri.toString());
+            const iw = this.interactiveWindowProvider.get(uri);
             if (iw && iw.notebookDocument) {
                 const kernel = this.kernelProvider.get(iw.notebookDocument);
                 if (kernel) {
-                    traceVerbose(`Interrupt kernel due to debug stop of IW ${uri.toString()}`);
+                    logger.debug(`Interrupt kernel due to debug stop of IW ${uri.toString()}`);
                     // If we have a matching iw, then stop current execution
                     await kernel.interrupt();
                 }
             }
 
-            this.commandManager.executeCommand('workbench.action.debug.stop').then(noop, noop);
+            commands.executeCommand('workbench.action.debug.stop').then(noop, noop);
         }
     }
 
@@ -448,7 +405,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     private async debugContinue(): Promise<void> {
         // Make sure that we are in debug mode
         if (this.debugService?.activeDebugSession) {
-            this.commandManager.executeCommand('workbench.action.debug.continue').then(noop, noop);
+            commands.executeCommand('workbench.action.debug.continue').then(noop, noop);
         }
     }
 
@@ -560,7 +517,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     }
 
     private async createNewNotebook(): Promise<void> {
-        this.appShell
+        window
             .showInformationMessage(
                 'This command has been deprecated and will eventually be removed, please use ["Create: New Jupyter Notebook"](command:workbench.action.openGlobalKeybindings?%5B%22@command:ipynb.newUntitledIpynb%22%5D) instead.'
             )
@@ -569,7 +526,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     }
 
     private getCurrentCodeLens(): CodeLens | undefined {
-        const activeEditor = this.documentManager.activeTextEditor;
+        const activeEditor = window.activeTextEditor;
         const activeCodeWatcher = this.getCurrentCodeWatcher();
         if (activeEditor && activeCodeWatcher) {
             // Find the cell that matches
@@ -586,7 +543,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     }
     // Get our matching code watcher for the active document
     private getCurrentCodeWatcher(): ICodeWatcher | undefined {
-        const activeEditor = this.documentManager.activeTextEditor;
+        const activeEditor = window.activeTextEditor;
         if (!activeEditor || !activeEditor.document || !this.dataScienceCodeLensProvider) {
             return undefined;
         }
@@ -606,12 +563,12 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     private async openVariableView(): Promise<void> {
         // For all contributed views vscode creates a command with the format [view ID].focus to focus that view
         // It's the given way to focus a single view so using that here, note that it needs to match the view ID
-        return this.commandManager.executeCommand('jupyterViewVariables.focus');
+        return commands.executeCommand('jupyterViewVariables.focus');
     }
 
     // Open the VS Code outline view
     private async openOutlineView(): Promise<void> {
-        return this.commandManager.executeCommand('outline.focus');
+        return commands.executeCommand('outline.focus');
     }
 
     /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -621,7 +578,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
             result = await promise();
             return result;
         } catch (err) {
-            traceError('listenForErrors', err as any);
+            logger.error('listenForErrors', err as any);
             this.dataScienceErrorHandler.handleError(err).then(noop, noop);
         }
         return result;
@@ -632,7 +589,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
         const filePath = getFilePath(file);
         if (filePath && filePath.length > 0 && this.jupyterExporter) {
             // If the current file is the active editor, then generate cells from the document.
-            const activeEditor = this.documentManager.activeTextEditor;
+            const activeEditor = window.activeTextEditor;
             if (activeEditor && this.fileSystem.arePathsSame(activeEditor.document.uri, file)) {
                 const cells = generateCellsFromDocument(
                     activeEditor.document,
@@ -640,22 +597,22 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
                 );
                 if (cells) {
                     // Bring up the export dialog box
-                    const uri = await this.exportDialog.showDialog(ExportFormat.ipynb, file);
+                    const uri = await new ExportDialog().showDialog(ExportFormat.ipynb, file);
                     await this.waitForStatus(
                         async () => {
                             if (uri) {
-                                const notebook = await this.jupyterExporter?.translateToNotebook(cells);
-                                await this.fileSystem.writeFile(uri, JSON.stringify(notebook));
+                                const notebook = await this.jupyterExporter?.serialize(cells);
+                                await this.fileSystem.writeFile(uri, notebook || '');
                             }
                         },
-                        DataScience.exportingFormat(),
+                        DataScience.exportingFormat,
                         getDisplayPath(file)
                     );
                     // When all done, show a notice that it completed.
                     if (uri && filePath) {
-                        const openQuestion1 = DataScience.exportOpenQuestion1();
-                        const selection = await this.applicationShell.showInformationMessage(
-                            DataScience.exportDialogComplete().format(getDisplayPath(file)),
+                        const openQuestion1 = DataScience.exportOpenQuestion1;
+                        const selection = await window.showInformationMessage(
+                            DataScience.exportDialogComplete(getDisplayPath(file)),
                             openQuestion1
                         );
                         if (selection === openQuestion1) {
@@ -674,10 +631,11 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
             filePath &&
             filePath.length > 0 &&
             this.jupyterExporter &&
-            (await this.jupyterExecution.isNotebookSupported())
+            this.jupyterServerHelper &&
+            (await this.jupyterServerHelper.isJupyterServerSupported())
         ) {
             // If the current file is the active editor, then generate cells from the document.
-            const activeEditor = this.documentManager.activeTextEditor;
+            const activeEditor = window.activeTextEditor;
             if (
                 activeEditor &&
                 activeEditor.document &&
@@ -689,55 +647,46 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
                 );
                 if (cells) {
                     // Bring up the export dialog box
-                    const uri = await this.exportDialog.showDialog(ExportFormat.ipynb, file);
+                    const uri = await new ExportDialog().showDialog(ExportFormat.ipynb, file);
                     if (!uri) {
                         return;
                     }
                     await this.waitForStatus(
                         async () => {
                             if (uri) {
-                                const notebook = await this.jupyterExporter?.translateToNotebook(cells);
-                                await this.fileSystem.writeFile(uri, JSON.stringify(notebook));
+                                const notebook = await this.jupyterExporter?.serialize(cells);
+                                await this.fileSystem.writeFile(uri, notebook || '');
                             }
                         },
-                        DataScience.exportingFormat(),
+                        DataScience.exportingFormat,
                         getDisplayPath(file)
                     );
                     // Next open this notebook & execute it.
-                    const editor = await this.notebook
-                        .openNotebookDocument(uri)
-                        .then((document) => this.notebook.showNotebookDocument(document));
-                    const { controller } = await this.controllerPreferredService.computePreferred(editor.notebook);
-                    if (controller) {
-                        await this.commandManager.executeCommand('notebook.selectKernel', {
-                            id: controller.id,
-                            extension: JVSC_EXTENSION_ID
-                        });
-                    }
-                    await this.commandManager.executeCommand('notebook.execute');
+                    await workspace.openNotebookDocument(uri).then((document) => window.showNotebookDocument(document));
+                    await commands.executeCommand('notebook.execute');
                     return uri;
                 }
             }
-        } else {
+        } else if (this.jupyterServerHelper) {
             await this.dataScienceErrorHandler.handleError(
                 new JupyterInstallError(
-                    DataScience.jupyterNotSupported().format(await this.jupyterExecution.getNotebookError())
+                    DataScience.jupyterNotSupported(await this.jupyterServerHelper.getJupyterServerError())
                 )
             );
         }
     }
 
     private async expandAllCells(uri?: Uri) {
-        const interactiveWindow = this.getTargetInteractiveWindow(uri);
-        traceInfo(`Expanding all cells in interactive window with uri ${interactiveWindow?.notebookUri}`);
+        const interactiveWindow = this.interactiveWindowProvider.getInteractiveWindowWithNotebook(uri);
+        logger.info(`Expanding all cells in interactive window with uri ${interactiveWindow?.notebookUri}`);
         if (interactiveWindow) {
             await interactiveWindow.expandAllCells();
         }
     }
 
     private async collapseAllCells(uri?: Uri) {
-        const interactiveWindow = this.getTargetInteractiveWindow(uri);
-        traceInfo(`Collapsing all cells in interactive window with uri ${interactiveWindow?.notebookUri}`);
+        const interactiveWindow = this.interactiveWindowProvider.getInteractiveWindowWithNotebook(uri);
+        logger.info(`Collapsing all cells in interactive window with uri ${interactiveWindow?.notebookUri}`);
         if (interactiveWindow) {
             await interactiveWindow.collapseAllCells();
         }
@@ -751,42 +700,41 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     }
 
     private exportAs(uri?: Uri) {
-        const interactiveWindow = this.getTargetInteractiveWindow(uri);
+        const interactiveWindow = this.interactiveWindowProvider.getInteractiveWindowWithNotebook(uri);
         if (interactiveWindow) {
             interactiveWindow.exportAs();
         }
     }
 
     private export(uri?: Uri) {
-        const interactiveWindow = this.getTargetInteractiveWindow(uri);
+        const interactiveWindow = this.interactiveWindowProvider.getInteractiveWindowWithNotebook(uri);
         if (interactiveWindow) {
             interactiveWindow.export();
         }
     }
 
-    @captureUsageTelemetry(Telemetry.CreateNewInteractive)
     private async createNewInteractiveWindow(connection?: KernelConnectionMetadata): Promise<void> {
         await this.interactiveWindowProvider?.getOrCreate(undefined, connection);
     }
 
     private waitForStatus<T>(
         promise: () => Promise<T>,
-        format: string,
-        file?: string,
+        formatMessage: (arg1: string) => string,
+        file: string,
         canceled?: () => void
     ): Promise<T> {
-        const message = file ? format.format(file) : format;
+        const message = formatMessage(file || '');
         return this.statusProvider.waitWithStatus(promise, message, undefined, canceled);
     }
 
     @captureUsageTelemetry(Telemetry.ImportNotebook, { scope: 'command' })
     private async importNotebook(): Promise<void> {
-        const filtersKey = DataScience.importDialogFilter();
+        const filtersKey = DataScience.importDialogFilter;
         const filtersObject: { [name: string]: string[] } = {};
         filtersObject[filtersKey] = ['ipynb'];
 
-        const uris = await this.applicationShell.showOpenDialog({
-            openLabel: DataScience.importDialogTitle(),
+        const uris = await window.showOpenDialog({
+            openLabel: DataScience.importDialogTitle,
             filters: filtersObject
         });
 
@@ -796,7 +744,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
                 async () => {
                     await this.fileConverter.importIpynb(uris[0]);
                 },
-                DataScience.importingFormat(),
+                DataScience.importingFormat,
                 getDisplayPath(uris[0])
             );
         }
@@ -810,7 +758,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
                 async () => {
                     await this.fileConverter.importIpynb(file);
                 },
-                DataScience.importingFormat(),
+                DataScience.importingFormat,
                 getDisplayPath(file)
             );
         }
@@ -819,9 +767,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     private async scrollToCell(file: Uri, id: string): Promise<void> {
         if (id && file) {
             // Find the interactive windows that have this file as a submitter
-            const possibles = this.interactiveWindowProvider.windows.filter(
-                (w) => w.submitters.findIndex((s) => this.fileSystem.arePathsSame(s, file)) >= 0
-            );
+            const possibles = this.interactiveWindowProvider.getInteractiveWindowsWithSubmitter(file);
 
             // Scroll to cell in the one that has the cell. We need this so
             // we don't activate all of them.
@@ -836,7 +782,10 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
     }
 
     private async clearAllCellsInInteractiveWindow(context?: { notebookEditor: { notebookUri: Uri } }): Promise<void> {
-        const uri = this.getTargetInteractiveWindow(context?.notebookEditor?.notebookUri)?.notebookUri;
+        const uri = this.interactiveWindowProvider.getInteractiveWindowWithNotebook(
+            context?.notebookEditor?.notebookUri
+        )?.notebookUri;
+
         if (!uri) {
             return;
         }
@@ -859,7 +808,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
             const uri = Uri.parse(context.metadata.interactive.uristring);
             const line = context.metadata.interactive.lineIndex;
 
-            const editor = await this.documentManager.showTextDocument(uri, { viewColumn: ViewColumn.One });
+            const editor = await window.showTextDocument(uri, { viewColumn: ViewColumn.One });
 
             // If we found the editor change its selection
             if (editor) {
@@ -877,19 +826,7 @@ export class CommandRegistry implements IDisposable, IExtensionSingleActivationS
                 context.metadata.interactiveWindowCellMarker ?? settings.defaultCellMarker,
                 context.document.getText()
             ].join('\n');
-            await this.clipboard.writeText(source);
+            await env.clipboard.writeText(source);
         }
-    }
-
-    private getTargetInteractiveWindow(notebookUri: Uri | undefined) {
-        let targetInteractiveWindow;
-        if (notebookUri !== undefined) {
-            targetInteractiveWindow = this.interactiveWindowProvider.windows.find(
-                (w) => w.notebookUri?.toString() === notebookUri.toString()
-            );
-        } else {
-            targetInteractiveWindow = this.interactiveWindowProvider.getActiveOrAssociatedInteractiveWindow();
-        }
-        return targetInteractiveWindow;
     }
 }

@@ -1,11 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import fastDeepEqual from 'fast-deep-equal';
 import type * as nbformat from '@jupyterlab/nbformat';
-import * as KernelMessage from '@jupyterlab/services/lib/kernel/messages';
+import type * as KernelMessage from '@jupyterlab/services/lib/kernel/messages';
 import {
     NotebookCell,
     NotebookCellExecution,
@@ -21,30 +19,33 @@ import {
     EventEmitter,
     ExtensionMode,
     NotebookEdit,
-    NotebookCellOutputItem
+    NotebookCellOutputItem,
+    Disposable,
+    window,
+    extensions
 } from 'vscode';
 
-import { Kernel } from '@jupyterlab/services';
+import type { Kernel } from '@jupyterlab/services';
 import { CellExecutionCreator } from './cellExecutionCreator';
-import { IApplicationShell } from '../../platform/common/application/types';
-import { disposeAllDisposables } from '../../platform/common/helpers';
-import { traceError, traceInfoIfCI, traceWarning } from '../../platform/logging';
+import { dispose } from '../../platform/common/utils/lifecycle';
+import { logger } from '../../platform/logging';
 import { IDisposable, IExtensionContext } from '../../platform/common/types';
 import { concatMultilineString, formatStreamText, isJupyterNotebook } from '../../platform/common/utils';
 import {
     traceCellMessage,
     cellOutputToVSCCellOutput,
     translateCellDisplayOutput,
-    CellOutputMimeTypes
+    CellOutputMimeTypes,
+    findErrorLocation
 } from './helpers';
 import { swallowExceptions } from '../../platform/common/utils/decorators';
 import { noop } from '../../platform/common/utils/misc';
 import { IKernelController, ITracebackFormatter } from '../../kernels/types';
 import { handleTensorBoardDisplayDataOutput } from './executionHelpers';
-import isObject = require('lodash/isObject');
-import { Identifiers, WIDGET_MIMETYPE } from '../../platform/common/constants';
-import { Lazy } from '../../platform/common/utils/lazy';
+import { Identifiers, RendererExtension, WIDGET_MIMETYPE } from '../../platform/common/constants';
 import { CellOutputDisplayIdTracker } from './cellDisplayIdTracker';
+import { createDeferred } from '../../platform/common/utils/async';
+import { coerce, SemVer } from 'semver';
 
 // Helper interface for the set_next_input execute reply payload
 interface ISetNextInputPayload {
@@ -71,7 +72,7 @@ type WidgetData = {
  */
 export const activeNotebookCellExecution = new WeakMap<NotebookDocument, NotebookCellExecution | undefined>();
 
-function getParentHeaderMsgId(msg: KernelMessage.IMessage): string | undefined {
+export function getParentHeaderMsgId(msg: KernelMessage.IMessage): string | undefined {
     if (msg.parent_header && 'msg_id' in msg.parent_header) {
         return msg.parent_header.msg_id;
     }
@@ -114,6 +115,7 @@ export class CellExecutionMessageHandler implements IDisposable {
     private previousResultsToRestore?: NotebookCellExecutionSummary;
     private cellHasErrorsInOutput?: boolean;
     private disposed?: boolean;
+    private startTime?: number;
 
     public get hasErrorOutput() {
         return this.cellHasErrorsInOutput === true;
@@ -170,18 +172,29 @@ export class CellExecutionMessageHandler implements IDisposable {
      * or for any subsequent requests as a result of outputs sending custom messages.
      */
     private readonly ownedRequestMsgIds = new Set<string>();
+    private readonly _completed = createDeferred<void>();
+    public get completed() {
+        return this._completed.promise;
+    }
+    private gotIdleIOPubStatus = false;
+    private gotShellReply = false;
+    private streamsReAttachedToExecutingCell = false;
+    private endAbnormallyTimeout?: NodeJS.Timeout | number;
     constructor(
         public readonly cell: NotebookCell,
-        private readonly applicationService: IApplicationShell,
         private readonly controller: IKernelController,
         private readonly context: IExtensionContext,
         private readonly formatters: ITracebackFormatter[],
         private readonly kernel: Kernel.IKernelConnection,
-        request: Kernel.IShellFuture<KernelMessage.IExecuteRequestMsg, KernelMessage.IExecuteReplyMsg>,
-        cellExecution: NotebookCellExecution
+        private readonly request:
+            | Kernel.IShellFuture<KernelMessage.IExecuteRequestMsg, KernelMessage.IExecuteReplyMsg>
+            | undefined,
+        cellExecution: NotebookCellExecution,
+        executionMessageId: string
     ) {
-        this.executeRequestMessageId = request.msg.header.msg_id;
-        this.ownedRequestMsgIds.add(request.msg.header.msg_id);
+        this._completed.promise.catch(noop);
+        this.executeRequestMessageId = executionMessageId;
+        this.ownedRequestMsgIds.add(executionMessageId);
         workspace.onDidChangeNotebookDocument(
             (e) => {
                 if (!isJupyterNotebook(e.notebook)) {
@@ -207,27 +220,29 @@ export class CellExecutionMessageHandler implements IDisposable {
         this.kernel.anyMessage.connect(this.onKernelAnyMessage, this);
         this.kernel.iopubMessage.connect(this.onKernelIOPubMessage, this);
 
-        request.onIOPub = () => {
-            // Cell has been deleted or the like.
-            if (this.cell.document.isClosed && !this.completedExecution) {
-                request.dispose();
-            }
-        };
-        request.onReply = (msg) => {
-            // Cell has been deleted or the like.
-            if (this.cell.document.isClosed) {
-                request.dispose();
-                return;
-            }
-            this.handleReply(msg);
-        };
-        request.onStdin = this.handleInputRequest.bind(this);
-        request.done
-            .finally(() => {
-                this.completedExecution = true;
-                this.endCellExecution();
-            })
-            .catch(noop);
+        if (request) {
+            request.onIOPub = () => {
+                // Cell has been deleted or the like.
+                if (this.cell.document.isClosed && !this.completedExecution) {
+                    request.dispose();
+                }
+            };
+            request.onReply = (msg) => {
+                // Cell has been deleted or the like.
+                if (this.cell.document.isClosed) {
+                    request.dispose();
+                    return;
+                }
+                this.handleReply(msg);
+            };
+            request.onStdin = this.handleInputRequest.bind(this);
+            request.done
+                .finally(() => {
+                    this.completedExecution = true;
+                    this.endCellExecution();
+                })
+                .catch(noop);
+        }
     }
     /**
      * This method is called when all execution has been completed (successfully or failed).
@@ -239,13 +254,22 @@ export class CellExecutionMessageHandler implements IDisposable {
         }
         this.disposed = true;
         traceCellMessage(this.cell, 'Execution Message Handler disposed');
-        disposeAllDisposables(this.disposables);
+        dispose(this.disposables);
         this.prompts.forEach((item) => item.dispose());
         this.prompts.clear();
-        this.clearLastUsedStreamOutput();
+        // Assume you have a long running cell, then reload vscode, next this cell continues running.
+        // Next you interrupt this cell, next this class will get disposed
+        // However due to restoring outputs, we could end up with a final stream output or the like,
+        // The new stream ends up getting added as a new output (instead of appending to existing output),
+        // this happens as the previous stream has been cleared (if we call clearLastUsedStreamOutput).
+        // Thats why we never clear the last stream when disposing this class for restored executions (request === undefined).
+        if (this.request) {
+            this.clearLastUsedStreamOutput();
+        }
         this.execution = undefined;
         this.kernel.anyMessage.disconnect(this.onKernelAnyMessage, this);
         this.kernel.iopubMessage.disconnect(this.onKernelIOPubMessage, this);
+        this._onErrorHandlingIOPubMessage.dispose();
     }
     /**
      * This merely marks the end of the cell execution.
@@ -256,21 +280,116 @@ export class CellExecutionMessageHandler implements IDisposable {
     private endCellExecution() {
         this.prompts.forEach((item) => item.dispose());
         this.prompts.clear();
-        this.clearLastUsedStreamOutput();
+        // Assume you have a long running cell, then reload vscode, next this cell continues running.
+        // Next you interrupt this cell, next this class will get disposed
+        // However due to restoring outputs, we could end up with a final stream output or the like,
+        // The new stream ends up getting added as a new output (instead of appending to existing output),
+        // this happens as the previous stream has been cleared (if we call clearLastUsedStreamOutput).
+        // Thats why we never clear the last stream when disposing this class for restored executions (request === undefined).
+        if (this.request) {
+            this.clearLastUsedStreamOutput();
+        }
         this.execution = undefined;
+        this._completed.resolve();
     }
     private onKernelAnyMessage(_: unknown, { direction, msg }: Kernel.IAnyMessageArgs) {
         if (this.cell.document.isClosed) {
             return this.endCellExecution();
         }
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const jupyterLab = require('@jupyterlab/services') as typeof import('@jupyterlab/services');
 
+        if (!this.request && direction === 'recv') {
+            const parentMsgId = getParentHeaderMsgId(msg);
+            // In @jupyterlab/services/lib/kernel/future.js a request is marked as completed when we receive a status message with execution_state = 'idle' and have received a reply in shell chanel.
+            if (
+                jupyterLab.KernelMessage.isStatusMsg(msg) &&
+                msg.content.execution_state === 'idle' &&
+                parentMsgId === this.executeRequestMessageId
+            ) {
+                this.gotIdleIOPubStatus = true;
+            }
+            if (msg.channel === 'shell' && parentMsgId === this.executeRequestMessageId) {
+                this.gotShellReply = true;
+            }
+            // Scenario
+            // Start a long running cell, then reload vscode
+            // now interrupt the cell after we reload, this will send an interrupt request to the kernel
+            // We will get a response saying that the response is being processed, but that does not mean it was processed.
+            // So we should ignore status == busy messages for other msg_ids
+            // We are only interested in idle messages for new requests.
+            const isBusyProcessingAnotherRequest =
+                jupyterLab.KernelMessage.isStatusMsg(msg) &&
+                msg.content.execution_state !== 'idle' &&
+                parentMsgId !== this.executeRequestMessageId;
+
+            typeof msg.parent_header === 'object' &&
+                msg.parent_header &&
+                'msg_type' in msg.parent_header &&
+                msg.parent_header.msg_type === 'interrupt_request';
+            // If we have a new parent message id, then this means a new request is being processed.
+            // I.e. previous request is done.
+            const gotANewMessage = parentMsgId
+                ? parentMsgId !== this.executeRequestMessageId && !isBusyProcessingAnotherRequest
+                : false;
+            const isResponseToInterruptRequest =
+                typeof msg.parent_header === 'object' &&
+                msg.parent_header &&
+                'msg_type' in msg.parent_header &&
+                msg.parent_header.msg_type === 'interrupt_request';
+            // This is what marks a request as completed in Jupyter Lab API.
+            const completed = this.gotIdleIOPubStatus && this.gotShellReply;
+            // The following are backups, just in case the above doesn't work.
+            // If we're resuming execution of a cell, then end the cell execution
+            // when we receive certain message types.
+            // If we're reloading or the like and then re-connecting to an active session, then
+            // the kernel is probably busy executing a cell,
+            // The first thin we do is always send a request for kernle info,
+            // If we get a response for that, then this means the previous cell execution has completed.
+            // Similarly if we see a response for an execution then the previous execution has completed.
+            const messageTypesIndicatingEndOfCellExecution = ['kernel_info_reply', 'execute_input', 'execute_reply'];
+            const gotMessageThatIndicatesEndOfCellExecution =
+                'msg_type' in msg &&
+                typeof msg.msg_type === 'string' &&
+                messageTypesIndicatingEndOfCellExecution.includes(msg.msg_type);
+            if (!this.completedExecution && completed) {
+                this.completedExecution = true;
+                // Clear the hacky way of ending the execution.
+                if (this.endAbnormallyTimeout) {
+                    clearTimeout(this.endAbnormallyTimeout);
+                }
+                return this.endCellExecution();
+            }
+            if (!this.completedExecution && (gotMessageThatIndicatesEndOfCellExecution || gotANewMessage)) {
+                // This is a hacky way of ending the execution, hence wait for 100ms  before ending the execution.
+                // Its possible that within a second we will a proper response from the kernel that marks the end of execution.
+                if (this.endAbnormallyTimeout) {
+                    clearTimeout(this.endAbnormallyTimeout);
+                }
+                this.endAbnormallyTimeout = setTimeout(
+                    () => {
+                        this.completedExecution = true;
+                        this.endAbnormallyTimeout = undefined;
+                        return this.endCellExecution();
+                    },
+                    // If we got an idle response to an interrupt request, this means the previous request has ended.
+                    // However its very likely we will get a valid response to end the previous request, hence lets wait 1s for that response to come back.
+                    isResponseToInterruptRequest ? 1000 : 100
+                );
+                this.disposables.push(
+                    new Disposable(() => {
+                        clearTimeout(this.endAbnormallyTimeout);
+                        this.endAbnormallyTimeout = undefined;
+                    })
+                );
+                return;
+            }
+        }
         // We're only interested in messages after execution has completed.
         // See https://github.com/microsoft/vscode-jupyter/issues/9503 for more information.
         if (direction !== 'send' || !this.completedExecution) {
             return;
         }
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const jupyterLab = require('@jupyterlab/services') as typeof import('@jupyterlab/services');
         if (jupyterLab.KernelMessage.isCommMsgMsg(msg) && this.ownedCommIds.has(msg.content.comm_id)) {
             // Looks like we have a comm msg request sent by some output or the like.
             // See https://github.com/microsoft/vscode-jupyter/issues/9503 for more information.
@@ -281,6 +400,7 @@ export class CellExecutionMessageHandler implements IDisposable {
         if (this.cell.document.isClosed) {
             return this.endCellExecution();
         }
+
         // We're only interested in messages after execution has completed.
         // See https://github.com/microsoft/vscode-jupyter/issues/9503 for more information.
 
@@ -298,7 +418,7 @@ export class CellExecutionMessageHandler implements IDisposable {
         try {
             this.handleIOPub(msg);
         } catch (ex) {
-            traceError(`Failed to handle iopub message as a result of some comm message`, msg, ex);
+            logger.error(`Failed to handle iopub message as a result of some comm message`, msg, ex);
             if (!this.completedExecution && !this.cell.document.isClosed) {
                 // If there are problems handling the execution, then bubble those to the calling code.
                 // Else just log the errors.
@@ -317,22 +437,27 @@ export class CellExecutionMessageHandler implements IDisposable {
      * Creating one results in side effects such as execution order getting reset and timers starting.
      * Hence where possible re-use an existing cell execution task associated with this document.
      */
-    private createTemporaryTask() {
+    private createTemporaryTask(executionMustBelongToCurrentCell: boolean) {
         if (this.cell.document.isClosed) {
             return;
         }
         // If we have an active task, use that instead of creating a new task.
         const existingTask = activeNotebookCellExecution.get(this.cell.notebook);
         if (existingTask) {
-            return existingTask;
+            if (
+                !executionMustBelongToCurrentCell ||
+                (executionMustBelongToCurrentCell && existingTask.cell.index === this.cell.index)
+            ) {
+                return existingTask;
+            }
         }
 
         // Create a temporary task.
         this.previousResultsToRestore = { ...(this.cell.executionSummary || {}) };
         this.temporaryExecution = CellExecutionCreator.getOrCreate(this.cell, this.controller);
         this.temporaryExecution?.start();
-        if (this.previousResultsToRestore?.executionOrder && this.execution) {
-            this.execution.executionOrder = this.previousResultsToRestore.executionOrder;
+        if (this.previousResultsToRestore?.executionOrder && this.temporaryExecution) {
+            this.temporaryExecution.executionOrder = this.previousResultsToRestore.executionOrder;
         }
         return this.temporaryExecution;
     }
@@ -356,6 +481,22 @@ export class CellExecutionMessageHandler implements IDisposable {
         this.temporaryExecution = undefined;
     }
     private handleIOPub(msg: KernelMessage.IIOPubMessage) {
+        if (!this.startTime) {
+            // Set the start time after we get some kind of a response to the execution request.
+            // This is a more accurate representation of when the cell execution started.
+            this.startTime = new Date().getTime();
+            // try {
+            //     // The time from the kernel is more accurate, as that will ignore the network latency.
+            //     // Note: There could be an offset between the time on the kernel and the time on the client.
+            //     // https://github.com/microsoft/vscode-jupyter/issues/14072
+            //     // this.startTime = new Date(msg.header.date).getTime();
+            // } catch {
+            //     //
+            // }
+            this.execution?.start(this.startTime);
+            logger.debug(`Kernel acknowledged execution of cell ${this.cell.index} @ ${this.startTime}`);
+        }
+
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const jupyterLab = require('@jupyterlab/services') as typeof import('@jupyterlab/services');
         if (jupyterLab.KernelMessage.isCommOpenMsg(msg)) {
@@ -386,7 +527,7 @@ export class CellExecutionMessageHandler implements IDisposable {
         } else if (jupyterLab.KernelMessage.isCommCloseMsg(msg)) {
             // Noop.
         } else {
-            traceWarning(`Unknown message ${msg.header.msg_type} : hasData=${'data' in msg.content}`);
+            logger.warn(`Unknown message ${msg.header.msg_type} : hasData=${'data' in msg.content}`);
         }
 
         // Set execution count, all messages should have it
@@ -412,7 +553,7 @@ export class CellExecutionMessageHandler implements IDisposable {
             method: 'update';
             state: { msg_id: string } | { children: string[] };
         }>;
-        if (!isObject(data) || data.method !== 'update' || !isObject(data.state)) {
+        if (!data || data.method !== 'update' || typeof data.state !== 'object') {
             return;
         }
 
@@ -451,10 +592,10 @@ export class CellExecutionMessageHandler implements IDisposable {
             const IPY_MODEL_PREFIX = 'IPY_MODEL_';
             data.state.children.forEach((item) => {
                 if (typeof item !== 'string') {
-                    return traceWarning(`Came across a comm update message a child that isn't a string`, item);
+                    return logger.warn(`Came across a comm update message a child that isn't a string`, item);
                 }
                 if (!item.startsWith(IPY_MODEL_PREFIX)) {
-                    return traceWarning(
+                    return logger.warn(
                         `Came across a comm update message a child that start start with ${IPY_MODEL_PREFIX}`,
                         item
                     );
@@ -505,19 +646,18 @@ export class CellExecutionMessageHandler implements IDisposable {
         if (this.cell.document.isClosed) {
             return;
         }
-        traceCellMessage(this.cell, 'Update output');
+        traceCellMessage(
+            this.cell,
+            () => `Update output with mimes ${cellOutput.items.map((item) => item.mime).toString()}`
+        );
+        const task = this.getOrCreateExecutionTask(true);
         // Clear if necessary
-        this.clearOutputIfNecessary(this.execution);
+        this.clearOutputIfNecessary(task);
         // Keep track of the display_id against the output item, we might need this to update this later.
         if (displayId) {
-            CellOutputDisplayIdTracker.trackOutputByDisplayId(this.cell, displayId, cellOutput);
+            CellOutputDisplayIdTracker.trackOutputByDisplayId(this.cell, displayId, cellOutput, cellOutput.items);
         }
 
-        // Append to the data (we would push here but VS code requires a recreation of the array)
-        // Possible execution of cell has completed (the task would have been disposed).
-        // This message could have come from a background thread.
-        // In such circumstances, create a temporary task & use that to update the output (only cell execution tasks can update cell output).
-        let task = new Lazy(() => this.execution || this.createTemporaryTask());
         this.clearLastUsedStreamOutput();
         traceCellMessage(this.cell, 'Append output in addToCellData');
         // If the output belongs to a widget, then add the output to that specific widget (i.e. just below the widget).
@@ -545,7 +685,7 @@ export class CellExecutionMessageHandler implements IDisposable {
                         .handlingCommId,
                     outputToAppend: cellOutput
                 },
-                task.getValue()
+                task
             );
 
             if (result?.outputAdded) {
@@ -553,7 +693,7 @@ export class CellExecutionMessageHandler implements IDisposable {
             }
         }
         if (outputShouldBeAppended) {
-            task.getValue()?.appendOutput([cellOutput]).then(noop, noop);
+            task?.appendOutput([cellOutput]).then(noop, noop);
         }
         this.endTemporaryTask();
     }
@@ -573,17 +713,19 @@ export class CellExecutionMessageHandler implements IDisposable {
             return true;
         }
         if (mime === WIDGET_MIMETYPE) {
-            const data: WidgetData = JSON.parse(Buffer.from(outputItem.data).toString());
+            const data: WidgetData = JSON.parse(new TextDecoder().decode(outputItem.data));
             // Jupyter Output widgets cannot be rendered properly by the widget manager,
             // We need to render that.
             if (typeof data.model_id === 'string' && this.commIdsMappedToWidgetOutputModels.has(data.model_id)) {
-                return false;
+                // New version of renderer supports this.
+                return doesNotebookRendererSupportRenderingNestedOutputsInWidgets();
             }
             return true;
         }
         if (mime.startsWith('application/vnd')) {
-            // Custom vendored mimetypes cannot be rendered by the widget manager, it relies on the output renderers.
-            return false;
+            // Custom vendored mimetypes cannot be rendered by the widget manager in older versions, it relies on the output renderers.
+            // New version of renderer supports this.
+            return doesNotebookRendererSupportRenderingNestedOutputsInWidgets();
         }
         // Everything else can be rendered by the Jupyter Lab widget manager.
         return true;
@@ -621,7 +763,7 @@ export class CellExecutionMessageHandler implements IDisposable {
             .getCells()
             .find((cell) => CellExecutionMessageHandler.modelIdsOwnedByCells.get(cell)?.has(expectedModelId));
         if (!cell) {
-            traceWarning(`Unable to find a cell that owns the model ${expectedModelId}`);
+            logger.warn(`Unable to find a cell that owns the model ${expectedModelId}`);
             return;
         }
         const widgetOutput = cell.outputs.find((output) => {
@@ -630,10 +772,10 @@ export class CellExecutionMessageHandler implements IDisposable {
                     return false;
                 }
                 try {
-                    const value = JSON.parse(Buffer.from(outputItem.data).toString()) as { model_id?: string };
+                    const value = JSON.parse(new TextDecoder().decode(outputItem.data)) as { model_id?: string };
                     return value.model_id === expectedModelId;
                 } catch (ex) {
-                    traceWarning(`Failed to deserialize the widget data`, ex);
+                    logger.warn(`Failed to deserialize the widget data`, ex);
                 }
                 return false;
             });
@@ -701,7 +843,7 @@ export class CellExecutionMessageHandler implements IDisposable {
             const cancelToken = new CancellationTokenSource();
             this.prompts.add(cancelToken);
             const hasPassword = msg.content.password !== null && (msg.content.password as boolean);
-            await this.applicationService
+            await window
                 .showInputBox(
                     {
                         prompt: msg.content.prompt ? msg.content.prompt.toString() : '',
@@ -711,7 +853,8 @@ export class CellExecutionMessageHandler implements IDisposable {
                     cancelToken.token
                 )
                 .then((v) => {
-                    this.kernel.sendInputReply({ value: v || '', status: 'ok' });
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    this.kernel.sendInputReply({ value: v || '', status: 'ok' }, msg.header as any);
                 }, noop);
 
             this.prompts.delete(cancelToken);
@@ -798,6 +941,21 @@ export class CellExecutionMessageHandler implements IDisposable {
     private handleStatusMessage(msg: KernelMessage.IStatusMsg) {
         traceCellMessage(this.cell, `Kernel switching to ${msg.content.execution_state}`);
     }
+
+    /**
+     * Possible execution of cell has completed (the task would have been disposed).
+     * This message could have come from a background thread.
+     * In such circumstances, create a temporary task & use that to update the output (only cell execution tasks can update cell output).
+     */
+    private getOrCreateExecutionTask(executionMustBelongToCurrentCell: boolean) {
+        if (!executionMustBelongToCurrentCell && this.execution) {
+            return this.execution;
+        }
+        return this.execution?.cell === this.cell
+            ? this.execution
+            : this.createTemporaryTask(executionMustBelongToCurrentCell);
+    }
+
     private handleStreamMessage(msg: KernelMessage.IStreamMsg) {
         if (
             getParentHeaderMsgId(msg) &&
@@ -809,16 +967,40 @@ export class CellExecutionMessageHandler implements IDisposable {
             return;
         }
 
+        if (msg.parent_header.msg_type === 'comm_msg' && msg.header.msg_type === 'stream') {
+            // Fix for https://github.com/microsoft/vscode-jupyter/issues/15996
+            // We're not interested in stream messages that are part of comm messages.
+            return;
+        }
+
         // eslint-disable-next-line complexity
         traceCellMessage(this.cell, `Update streamed output, new output '${msg.content.text.substring(0, 100)}'`);
-        // Possible execution of cell has completed (the task would have been disposed).
-        // This message could have come from a background thread.
-        // In such circumstances, create a temporary task & use that to update the output (only cell execution tasks can update cell output).
-        const task = this.execution || this.createTemporaryTask();
+        const task = this.getOrCreateExecutionTask(true);
+
+        const outputName =
+            msg.content.name === 'stdout'
+                ? NotebookCellOutputItem.stdout('').mime
+                : NotebookCellOutputItem.stderr('').mime;
+        // If we're resuming a previously executing cell (e.g. by reloading vscode),
+        // & the last output is an output with the same stream output items then use that (instead of creating a whole new output).
+        // Because with streams we always append to the existing output (unless we have different mime types or different stream types)
+        if (!this.request && !this.streamsReAttachedToExecutingCell && !this.lastUsedStreamOutput) {
+            if (
+                this.cell.outputs.length &&
+                this.cell.outputs[this.cell.outputs.length - 1].items.length >= 1 &&
+                this.cell.outputs[this.cell.outputs.length - 1].items.every((item) => item.mime === outputName)
+            ) {
+                this.lastUsedStreamOutput = {
+                    output: this.cell.outputs[0],
+                    stream: msg.content.name
+                };
+            }
+        }
+        this.streamsReAttachedToExecutingCell = true;
 
         // Clear output if waiting for a clear
         const { previousValueOfClearOutputOnNextUpdateToOutput } = this.clearOutputIfNecessary(task);
-        // Ensure we append to previous output, only if the streams as the same &
+        // Ensure we append to previous output, only if the streams are the same &
         // If the last output is the desired stream type.
         if (this.lastUsedStreamOutput?.stream === msg.content.name) {
             const output = cellOutputToVSCCellOutput({
@@ -879,7 +1061,7 @@ export class CellExecutionMessageHandler implements IDisposable {
                     ].clearOutputOnNextUpdateToOutput = true;
                 }
             } else {
-                const task = this.execution || this.createTemporaryTask();
+                const task = this.getOrCreateExecutionTask(true);
                 this.updateJupyterOutputWidgetWithOutput({ clearOutput: true }, task);
                 this.endTemporaryTask();
             }
@@ -890,11 +1072,7 @@ export class CellExecutionMessageHandler implements IDisposable {
         if (msg.content.wait) {
             this.clearOutputOnNextUpdateToOutput = true;
         } else {
-            // Possible execution of cell has completed (the task would have been disposed).
-            // This message could have come from a background thread.
-            // In such circumstances, create a temporary task & use that to update the output (only cell execution tasks can update cell output).
-            // Clear all outputs and start over again.
-            const task = this.execution || this.createTemporaryTask();
+            const task = this.getOrCreateExecutionTask(true);
             this.clearLastUsedStreamOutput();
             task?.clearOutput().then(noop, noop);
             this.endTemporaryTask();
@@ -903,17 +1081,30 @@ export class CellExecutionMessageHandler implements IDisposable {
 
     private handleError(msg: KernelMessage.IErrorMsg) {
         let traceback = msg.content.traceback;
-        traceInfoIfCI(`Traceback for error ${traceback}`);
+        logger.ci(`Traceback for error ${traceback}`);
         this.formatters.forEach((formatter) => {
             traceback = formatter.format(this.cell, traceback);
         });
-        traceInfoIfCI(`Traceback for error after formatting ${traceback}`);
+        logger.ci(`Traceback for error after formatting ${traceback}`);
         const output: nbformat.IError = {
             output_type: 'error',
             ename: msg.content.ename,
             evalue: msg.content.evalue,
             traceback
         };
+
+        if (this.cell.notebook.notebookType !== 'interactive') {
+            const cellExecution = CellExecutionCreator.get(this.cell);
+            if (cellExecution && msg.content.ename !== 'KeyboardInterrupt') {
+                cellExecution.errorInfo = {
+                    name: msg.content.ename,
+                    message: msg.content.evalue,
+                    location: findErrorLocation(msg.content.traceback, this.cell),
+                    uri: this.cell.document.uri,
+                    stack: msg.content.traceback.join('\n')
+                };
+            }
+        }
 
         this.addToCellData(output, msg);
         this.cellHasErrorsInOutput = true;
@@ -939,43 +1130,112 @@ export class CellExecutionMessageHandler implements IDisposable {
     private handleUpdateDisplayDataMessage(msg: KernelMessage.IUpdateDisplayDataMsg) {
         const displayId = msg.content.transient.display_id;
         if (!displayId) {
+            logger.warn('Update display data message received, but no display id', msg.content);
             return;
         }
         const outputToBeUpdated = CellOutputDisplayIdTracker.getMappedOutput(this.cell.notebook, displayId);
         if (!outputToBeUpdated) {
+            // Possible this is a display Id that was created by code executed by an extension.
+            logger.trace('Update display data message received, but no output found to update', msg.content);
             return;
         }
-        const output = translateCellDisplayOutput(outputToBeUpdated);
+        if (outputToBeUpdated.cell.document.isClosed) {
+            logger.warn('Update display data message received, but output cell is closed', msg.content);
+            return;
+        }
+        const output = translateCellDisplayOutput(
+            new NotebookCellOutput(outputToBeUpdated.outputItems, outputToBeUpdated.outputContainer.metadata)
+        );
         const newOutput = cellOutputToVSCCellOutput({
             ...output,
             data: msg.content.data,
             metadata: msg.content.metadata
         } as nbformat.IDisplayData);
         // If there was no output and still no output, then nothing to do.
-        if (outputToBeUpdated.items.length === 0 && newOutput.items.length === 0) {
+        if (outputToBeUpdated.outputItems.length === 0 && newOutput.items.length === 0) {
+            logger.trace('Update display data message received, but no output to update', msg.content);
             return;
         }
         // Compare each output item (at the end of the day everything is serializable).
         // Hence this is a safe comparison.
-        if (outputToBeUpdated.items.length === newOutput.items.length) {
+        let outputMetadataHasChanged = false;
+        if (outputToBeUpdated.outputItems.length === newOutput.items.length) {
             let allAllOutputItemsSame = true;
-            for (let index = 0; index < outputToBeUpdated.items.length; index++) {
-                if (!fastDeepEqual(outputToBeUpdated.items[index], newOutput.items[index])) {
-                    allAllOutputItemsSame = false;
-                    break;
+            if (!fastDeepEqual(outputToBeUpdated.outputContainer.metadata || {}, newOutput.metadata || {})) {
+                outputMetadataHasChanged = true;
+                allAllOutputItemsSame = false;
+            }
+            if (allAllOutputItemsSame) {
+                for (let index = 0; index < outputToBeUpdated.outputItems.length; index++) {
+                    if (!fastDeepEqual(outputToBeUpdated.outputItems[index], newOutput.items[index])) {
+                        allAllOutputItemsSame = false;
+                        break;
+                    }
                 }
             }
             if (allAllOutputItemsSame) {
                 // If everything is still the same, then there's nothing to update.
+                logger.trace(
+                    'Update display data message received, but no output to update (data is the same)',
+                    msg.content
+                );
                 return;
             }
         }
-        // Possible execution of cell has completed (the task would have been disposed).
-        // This message could have come from a background thread.
-        // In such circumstances, create a temporary task & use that to update the output (only cell execution tasks can update cell output).
-        const task = this.execution || this.createTemporaryTask();
         traceCellMessage(this.cell, `Replace output items in display data ${newOutput.items.length}`);
-        task?.replaceOutputItems(newOutput.items, outputToBeUpdated).then(noop, noop);
+        if (outputMetadataHasChanged) {
+            // https://github.com/microsoft/vscode/issues/181369
+            // This operation is very unsafe as we replace all of the outputs, when we need to replace just one output.
+            // Unsafe because its possible some new outputs were added to this cell (appended).
+            // However this is the only way we can update the output along with its metadata.
+            const newOutputs = outputToBeUpdated.cell.outputs.map((o) => {
+                const jupyterOutput = translateCellDisplayOutput(o);
+                // Replace just the item that stores the display data.
+                if (
+                    jupyterOutput.output_type === 'display_data' &&
+                    'transient' in jupyterOutput &&
+                    jupyterOutput.transient &&
+                    typeof jupyterOutput.transient === 'object' &&
+                    'display_id' in jupyterOutput.transient &&
+                    typeof jupyterOutput.transient.display_id === 'string' &&
+                    jupyterOutput.transient.display_id === displayId
+                ) {
+                    return newOutput;
+                }
+                return o;
+            });
+            const task = this.getOrCreateExecutionTask(false);
+            task?.replaceOutput(newOutputs, outputToBeUpdated.cell).then(noop, noop);
+            CellOutputDisplayIdTracker.trackOutputByDisplayId(
+                outputToBeUpdated.cell,
+                displayId,
+                newOutput,
+                newOutput.items
+            );
+        } else {
+            const task = this.getOrCreateExecutionTask(false);
+            task?.replaceOutputItems(newOutput.items, outputToBeUpdated.outputContainer).then(noop, noop);
+            CellOutputDisplayIdTracker.trackOutputByDisplayId(
+                outputToBeUpdated.cell,
+                // Though the items have been replaced, the output container is still the same, hence keep track of the last output object.
+                displayId,
+                outputToBeUpdated.outputContainer,
+                newOutput.items
+            );
+        }
         this.endTemporaryTask();
     }
+}
+
+function doesNotebookRendererSupportRenderingNestedOutputsInWidgets() {
+    const rendererExtension = extensions.getExtension(RendererExtension);
+    if (!rendererExtension) {
+        return false;
+    }
+
+    const version = coerce(rendererExtension.packageJSON.version);
+    if (!version) {
+        return false;
+    }
+    return version.compare(new SemVer('1.1.0')) >= 0;
 }

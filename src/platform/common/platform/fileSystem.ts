@@ -1,17 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { inject, injectable } from 'inversify';
+import { injectable } from 'inversify';
 import * as vscode from 'vscode';
-import { IExtensionContext, IHttpClient } from '../types';
-import { IFileSystem, TemporaryFileUri } from './types';
+import { IFileSystem } from './types';
 import * as uriPath from '../../vscode-path/resources';
-import uuid from 'uuid/v4';
 import { isFileNotFoundError } from './errors';
-import { traceError } from '../../logging';
+import { logger } from '../../logging';
 import { computeHash } from '../crypto';
+import { HttpClient } from '../net/httpClient';
 
 export const ENCODING = 'utf8';
 
@@ -21,10 +18,7 @@ export const ENCODING = 'utf8';
 @injectable()
 export class FileSystem implements IFileSystem {
     protected vscfs: vscode.FileSystem;
-    constructor(
-        @inject(IExtensionContext) private readonly extensionContext: IExtensionContext,
-        @inject(IHttpClient) private readonly httpClient: IHttpClient
-    ) {
+    constructor() {
         this.vscfs = vscode.workspace.fs;
     }
 
@@ -54,34 +48,15 @@ export class FileSystem implements IFileSystem {
 
     async readFile(uri: vscode.Uri): Promise<string> {
         const result = await this.vscfs.readFile(uri);
-        const data = Buffer.from(result);
-        return data.toString(ENCODING);
+        return new TextDecoder().decode(result);
     }
 
     async stat(uri: vscode.Uri): Promise<vscode.FileStat> {
         return this.vscfs.stat(uri);
     }
 
-    async writeFile(uri: vscode.Uri, text: string | Buffer): Promise<void> {
-        const data = typeof text === 'string' ? Buffer.from(text) : text;
-        return this.vscfs.writeFile(uri, data);
-    }
-
-    async createTemporaryFile(options: { fileExtension?: string; prefix?: string }): Promise<TemporaryFileUri> {
-        // Global storage is guaranteed to be a writable location. Maybe the only one that works
-        // for both web and node.
-        const tmpFolder = uriPath.joinPath(this.extensionContext.globalStorageUri, 'tmp');
-        await this.vscfs.createDirectory(tmpFolder);
-        const fileUri = uriPath.joinPath(tmpFolder, `${options.prefix}-${uuid()}.${options.fileExtension}`);
-        await this.writeFile(fileUri, '');
-
-        // When disposing, the temporary file is destroyed
-        return {
-            file: fileUri,
-            dispose: () => {
-                return this.vscfs.delete(fileUri);
-            }
-        };
+    async writeFile(uri: vscode.Uri, text: string | Uint8Array): Promise<void> {
+        return this.vscfs.writeFile(uri, typeof text === 'string' ? new TextEncoder().encode(text) : text);
     }
 
     async exists(
@@ -94,7 +69,7 @@ export class FileSystem implements IFileSystem {
         // Special case. http/https always returns stat true even if the file doesn't
         // exist. In those two cases use the http client instead
         if (filename.scheme.toLowerCase() === 'http' || filename.scheme.toLowerCase() === 'https') {
-            return this.httpClient.exists(filename.toString());
+            return new HttpClient().exists(filename.toString());
         }
 
         // Otherwise use stat
@@ -107,7 +82,7 @@ export class FileSystem implements IFileSystem {
             if (isFileNotFoundError(err)) {
                 return false;
             }
-            traceError(`stat() failed for "${filename}"`, err);
+            logger.error(`stat() failed for "${filename}"`, err);
             return false;
         }
 

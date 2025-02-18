@@ -4,12 +4,12 @@
 import { inject, injectable } from 'inversify';
 import { CancellationToken, Disposable, Progress, ProgressLocation, window } from 'vscode';
 import { IExtensionSyncActivationService } from '../activation/types';
-import { createPromiseFromCancellation } from '../common/cancellation';
-import { disposeAllDisposables } from '../common/helpers';
+import { raceCancellation } from '../common/cancellation';
+import { dispose } from '../common/utils/lifecycle';
 import { IDisposable, IDisposableRegistry, Resource } from '../common/types';
 import { createDeferred } from '../common/utils/async';
 import { noop } from '../common/utils/misc';
-import { traceError } from '../logging';
+import { logger } from '../logging';
 import { getComparisonKey } from '../vscode-path/resources';
 import { getUserMessageForAction } from './messages';
 import { ReportableAction } from './types';
@@ -43,7 +43,7 @@ export class KernelProgressReporter implements IExtensionSyncActivationService {
         //
     }
     public dispose() {
-        disposeAllDisposables(Array.from(KernelProgressReporter.disposables));
+        dispose(Array.from(KernelProgressReporter.disposables));
     }
 
     /**
@@ -141,7 +141,7 @@ export class KernelProgressReporter implements IExtensionSyncActivationService {
         return {
             dispose: () => {
                 try {
-                    if (!progressInfo?.reporter) {
+                    if (!progressInfo) {
                         return;
                     }
                     // Find the list of progress messages just before this one.
@@ -152,9 +152,9 @@ export class KernelProgressReporter implements IExtensionSyncActivationService {
                     // If we have previous messages, display the last item.
                     if (progressInfo.progressList.length > 0) {
                         const message = progressInfo.progressList[progressInfo.progressList.length - 1];
-                        if (message !== progressInfo.title) {
+                        if (progressInfo.reporter) {
                             progressInfo.reporter.report({
-                                message
+                                message: message === progressInfo.title && progressInfo.reporter ? '' : message
                             });
                         }
                     } else {
@@ -163,7 +163,7 @@ export class KernelProgressReporter implements IExtensionSyncActivationService {
                         progressInfo.dispose();
                     }
                 } catch (ex) {
-                    traceError(`Failed to dispose Progress reporter for ${key}`, ex);
+                    logger.error(`Failed to dispose Progress reporter for ${key}`, ex);
                 }
             }
         };
@@ -208,10 +208,7 @@ export class KernelProgressReporter implements IExtensionSyncActivationService {
                                 progress.report({ message });
                             }
                         }
-                        await Promise.race([
-                            createPromiseFromCancellation({ token, cancelAction: 'resolve', defaultValue: true }),
-                            deferred.promise
-                        ]);
+                        await raceCancellation(token, deferred.promise);
                         if (KernelProgressReporter.instance!.kernelResourceProgressReporter.get(key) === info) {
                             KernelProgressReporter.instance!.kernelResourceProgressReporter.delete(key);
                         }

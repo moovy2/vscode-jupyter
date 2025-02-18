@@ -1,20 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { IWorkspaceService } from '../common/application/types';
 import { isTestExecution } from '../common/constants';
-import { traceError } from '../logging';
-import { IServiceContainer } from '../ioc/types';
+import { logger } from '../logging';
 import { sendTelemetryEvent } from '.';
 import { EventName } from './constants';
+import { workspace } from 'vscode';
 
-interface IStopWatch {
-    elapsedTime: number;
-}
+export const startupDurations: {
+    workspaceFolderCount: number;
+    totalActivateTime: number;
+    codeLoadingTime: number;
+    startActivateTime: number;
+    endActivateTime: number;
+} = { codeLoadingTime: 0, endActivateTime: 0, startActivateTime: 0, totalActivateTime: 0, workspaceFolderCount: 0 };
 
-export async function sendStartupTelemetry(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    activatedPromise: Promise<any>,
+export function sendStartupTelemetry(
     durations: {
         workspaceFolderCount: number;
         totalActivateTime: number;
@@ -22,58 +23,57 @@ export async function sendStartupTelemetry(
         startActivateTime: number;
         endActivateTime: number;
     },
-    stopWatch: IStopWatch,
-    serviceContainer: IServiceContainer
+    stopWatch: {
+        elapsedTime: number;
+    }
 ) {
     if (isTestExecution()) {
         return;
     }
 
     try {
-        await activatedPromise;
+        durations.endActivateTime = stopWatch.elapsedTime;
         durations.totalActivateTime = stopWatch.elapsedTime;
-        await updateActivationTelemetryProps(serviceContainer, durations);
+        Object.assign(startupDurations, durations);
+        updateActivationTelemetryProps(durations);
         sendTelemetryEvent(EventName.EXTENSION_LOAD, durations);
     } catch (ex) {
-        traceError('sendStartupTelemetry() failed.', ex);
+        logger.error('sendStartupTelemetry() failed.', ex);
     }
 }
 
-export async function sendErrorTelemetry(
+export function sendErrorTelemetry(
     ex: Error,
     durations: {
         workspaceFolderCount: number;
         totalActivateTime: number;
+        endActivateTime: number;
+        codeLoadingTime: number;
     },
-    serviceContainer?: IServiceContainer
+    stopWatch: {
+        elapsedTime: number;
+    }
 ) {
     try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let props: any = {};
-        if (serviceContainer) {
-            try {
-                await updateActivationTelemetryProps(serviceContainer, durations);
-            } catch (ex) {
-                traceError('getActivationTelemetryProps() failed.', ex);
-            }
-        }
+        durations.endActivateTime = stopWatch.elapsedTime;
+        durations.totalActivateTime = stopWatch.elapsedTime;
+        Object.assign(startupDurations, durations);
+        updateActivationTelemetryProps(durations);
         sendTelemetryEvent(EventName.EXTENSION_LOAD, durations, props, ex);
     } catch (exc2) {
-        traceError('sendErrorTelemetry() failed.', exc2);
+        logger.error('sendErrorTelemetry() failed.', exc2);
     }
 }
 
-async function updateActivationTelemetryProps(
-    serviceContainer: IServiceContainer,
-    durations: { workspaceFolderCount: number }
-) {
+function updateActivationTelemetryProps(durations: { workspaceFolderCount: number }) {
     // eslint-disable-next-line
     // TODO: Not all of this data is showing up in the database...
     // eslint-disable-next-line
     // TODO: If any one of these parts fails we send no info.  We should
     // be able to partially populate as much as possible instead
     // (through granular try-catch statements).
-    const workspaceService = serviceContainer.get<IWorkspaceService>(IWorkspaceService);
-    const workspaceFolderCount = workspaceService.hasWorkspaceFolders ? workspaceService.workspaceFolders!.length : 0;
+    const workspaceFolderCount = workspace.workspaceFolders?.length ?? 0;
     durations.workspaceFolderCount = workspaceFolderCount;
 }

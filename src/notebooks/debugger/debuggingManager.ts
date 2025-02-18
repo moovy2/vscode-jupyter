@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { inject, injectable } from 'inversify';
 import {
     debug,
@@ -12,16 +10,13 @@ import {
     DebugSessionOptions,
     NotebookCell,
     NotebookDocument,
-    Uri
+    Uri,
+    window,
+    workspace
 } from 'vscode';
 import { IKernelProvider } from '../../kernels/types';
-import { IExtensionSingleActivationService } from '../../platform/activation/types';
-import {
-    IApplicationShell,
-    ICommandManager,
-    IDebugService,
-    IVSCodeNotebook
-} from '../../platform/common/application/types';
+import { IExtensionSyncActivationService } from '../../platform/activation/types';
+import { IDebugService } from '../../platform/common/application/types';
 import { EditorContexts } from '../../platform/common/constants';
 import { ContextKey } from '../../platform/common/contextKey';
 import { IPlatformService } from '../../platform/common/platform/types';
@@ -29,11 +24,10 @@ import { IConfigurationService } from '../../platform/common/types';
 import { DataScience } from '../../platform/common/utils/localize';
 import { noop } from '../../platform/common/utils/misc';
 import { IServiceContainer } from '../../platform/ioc/types';
-import { traceInfo } from '../../platform/logging';
-import { ResourceSet } from '../../platform/vscode-path/map';
+import { logger } from '../../platform/logging';
 import * as path from '../../platform/vscode-path/path';
 import { sendTelemetryEvent } from '../../telemetry';
-import { IControllerLoader, IControllerSelection } from '../controllers/types';
+import { IControllerRegistration } from '../controllers/types';
 import { DebuggingTelemetry, pythonKernelDebugAdapter } from './constants';
 import { DebugCellController } from './controllers/debugCellController';
 import { RestartController } from './controllers/restartController';
@@ -43,6 +37,7 @@ import { DebuggingManagerBase } from './debuggingManagerBase';
 import { INotebookDebugConfig, INotebookDebuggingManager, KernelDebugMode } from './debuggingTypes';
 import { assertIsDebugConfig, IpykernelCheckResult } from './helper';
 import { KernelDebugAdapter } from './kernelDebugAdapter';
+import { ResourceSet } from '../../platform/common/utils/map';
 
 /**
  * The DebuggingManager maintains the mapping between notebook documents and debug sessions.
@@ -50,7 +45,7 @@ import { KernelDebugAdapter } from './kernelDebugAdapter';
 @injectable()
 export class DebuggingManager
     extends DebuggingManagerBase
-    implements IExtensionSingleActivationService, INotebookDebuggingManager
+    implements IExtensionSyncActivationService, INotebookDebuggingManager
 {
     private runByLineCells: ContextKey<Uri[]>;
     private runByLineDocuments: ContextKey<Uri[]>;
@@ -59,32 +54,20 @@ export class DebuggingManager
 
     public constructor(
         @inject(IKernelProvider) kernelProvider: IKernelProvider,
-        @inject(IControllerLoader) controllerLoader: IControllerLoader,
-        @inject(IControllerSelection) controllerSelection: IControllerSelection,
-        @inject(ICommandManager) commandManager: ICommandManager,
-        @inject(IApplicationShell) appShell: IApplicationShell,
-        @inject(IVSCodeNotebook) vscNotebook: IVSCodeNotebook,
+        @inject(IControllerRegistration) controllerRegistration: IControllerRegistration,
         @inject(IConfigurationService) private readonly configurationService: IConfigurationService,
         @inject(IPlatformService) private readonly platform: IPlatformService,
         @inject(IDebugService) private readonly debugService: IDebugService,
         @inject(IServiceContainer) serviceContainer: IServiceContainer
     ) {
-        super(
-            kernelProvider,
-            controllerLoader,
-            controllerSelection,
-            commandManager,
-            appShell,
-            vscNotebook,
-            serviceContainer
-        );
-        this.runByLineCells = new ContextKey(EditorContexts.RunByLineCells, commandManager);
-        this.runByLineDocuments = new ContextKey(EditorContexts.RunByLineDocuments, commandManager);
-        this.debugDocuments = new ContextKey(EditorContexts.DebugDocuments, commandManager);
+        super(kernelProvider, controllerRegistration, serviceContainer);
+        this.runByLineCells = new ContextKey(EditorContexts.RunByLineCells);
+        this.runByLineDocuments = new ContextKey(EditorContexts.RunByLineDocuments);
+        this.debugDocuments = new ContextKey(EditorContexts.DebugDocuments);
     }
 
-    public override async activate() {
-        await super.activate();
+    public override activate() {
+        super.activate();
         this.disposables.push(
             // factory for kernel debug adapters
             debug.registerDebugAdapterDescriptorFactory(pythonKernelDebugAdapter, {
@@ -113,24 +96,24 @@ export class DebuggingManager
             rblDocumentUris.push(controller.debugCell.notebook.uri);
         });
 
-        this.runByLineCells.set(rblCellUris).ignoreErrors();
-        this.runByLineDocuments.set(rblDocumentUris).ignoreErrors();
+        this.runByLineCells.set(rblCellUris).catch(noop);
+        this.runByLineDocuments.set(rblDocumentUris).catch(noop);
     }
 
     private updateDebugContextKey() {
         const debugDocumentUris = new ResourceSet();
         this.notebookToDebugAdapter.forEach((_, notebook) => debugDocumentUris.add(notebook.uri));
         this.notebookInProgress.forEach((notebook) => debugDocumentUris.add(notebook.uri));
-        this.debugDocuments.set(Array.from(debugDocumentUris.values())).ignoreErrors();
+        this.debugDocuments.set(Array.from(debugDocumentUris.values())).catch(noop);
     }
 
     public async tryToStartDebugging(mode: KernelDebugMode, cell: NotebookCell, skipIpykernelCheck = false) {
-        traceInfo(`Starting debugging with mode ${mode}`);
+        logger.info(`Starting debugging with mode ${mode}`);
 
         if (!skipIpykernelCheck) {
             const ipykernelResult = await this.checkIpykernelAndPrompt(cell);
             if (ipykernelResult !== IpykernelCheckResult.Ok) {
-                traceInfo(`Ipykernel check failed: ${IpykernelCheckResult[ipykernelResult]}`);
+                logger.info(`Ipykernel check failed: ${IpykernelCheckResult[ipykernelResult]}`);
                 return;
             }
         }
@@ -187,20 +170,20 @@ export class DebuggingManager
         assertIsDebugConfig(config);
 
         const notebookUri = config.__notebookUri;
-        const notebook = this.vscNotebook.notebookDocuments.find((doc) => doc.uri.toString() === notebookUri);
+        const notebook = workspace.notebookDocuments.find((doc) => doc.uri.toString() === notebookUri);
 
         if (!notebook) {
-            traceInfo(`Cannot start debugging. Notebook ${notebookUri} not found.`);
+            logger.info(`Cannot start debugging. Notebook ${notebookUri} not found.`);
             return;
         }
 
         if (this.notebookInProgress.has(notebook)) {
-            traceInfo(`Cannot start debugging. Already debugging this notebook`);
+            logger.info(`Cannot start debugging. Already debugging this notebook`);
             return;
         }
 
         if (this.isDebugging(notebook)) {
-            traceInfo(`Cannot start debugging. Already debugging this notebook document.`);
+            logger.info(`Cannot start debugging. Already debugging this notebook document.`);
             return;
         }
 
@@ -236,11 +219,10 @@ export class DebuggingManager
                 const rblController = new RunByLineController(
                     adapter,
                     cell,
-                    this.commandManager,
                     this.kernelProvider.getKernelExecution(kernel!),
                     this.configurationService
                 );
-                adapter.setDebuggingDelegates([
+                adapter.addDebuggingDelegates([
                     rblController,
                     new RestartController(KernelDebugMode.RunByLine, adapter, cell, this.serviceContainer)
                 ]);
@@ -251,10 +233,9 @@ export class DebuggingManager
                 const controller = new DebugCellController(
                     adapter,
                     cell,
-                    this.kernelProvider.getKernelExecution(kernel!),
-                    this.commandManager
+                    this.kernelProvider.getKernelExecution(kernel!)
                 );
-                adapter.setDebuggingDelegates([
+                adapter.addDebuggingDelegates([
                     controller,
                     new RestartController(KernelDebugMode.Cell, adapter, cell, this.serviceContainer)
                 ]);
@@ -265,7 +246,7 @@ export class DebuggingManager
 
             return new DebugAdapterInlineImplementation(adapter);
         } else {
-            this.appShell.showInformationMessage(DataScience.kernelWasNotStarted()).then(noop, noop);
+            window.showInformationMessage(DataScience.kernelWasNotStarted).then(noop, noop);
         }
 
         return;

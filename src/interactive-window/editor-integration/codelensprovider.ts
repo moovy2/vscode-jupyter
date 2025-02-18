@@ -1,28 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import { inject, injectable, optional } from 'inversify';
 import * as vscode from 'vscode';
-
-import {
-    ICommandManager,
-    IDebugService,
-    IDocumentManager,
-    IWorkspaceService
-} from '../../platform/common/application/types';
-import { ContextKey } from '../../platform/common/contextKey';
-import { disposeAllDisposables } from '../../platform/common/helpers';
-
+import { IDebugService } from '../../platform/common/application/types';
+import { dispose } from '../../platform/common/utils/lifecycle';
 import { IConfigurationService, IDisposable, IDisposableRegistry } from '../../platform/common/types';
-import { noop } from '../../platform/common/utils/misc';
 import { StopWatch } from '../../platform/common/utils/stopWatch';
 import { IServiceContainer } from '../../platform/ioc/types';
 import { sendTelemetryEvent } from '../../telemetry';
-import { traceInfoIfCI, traceVerbose } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import {
     CodeLensCommands,
-    EditorContexts,
     InteractiveInputScheme,
     NotebookCellScheme,
     Telemetry
@@ -46,23 +35,19 @@ export class DataScienceCodeLensProvider implements IDataScienceCodeLensProvider
     constructor(
         @inject(IServiceContainer) private serviceContainer: IServiceContainer,
         @inject(IDebugLocationTracker) @optional() private debugLocationTracker: IDebugLocationTracker | undefined,
-        @inject(IDocumentManager) private documentManager: IDocumentManager,
         @inject(IConfigurationService) private configuration: IConfigurationService,
-        @inject(ICommandManager) private commandManager: ICommandManager,
         @inject(IDisposableRegistry) disposableRegistry: IDisposableRegistry,
-        @inject(IDebugService) private debugService: IDebugService,
-        @inject(IWorkspaceService) workspace: IWorkspaceService
+        @inject(IDebugService) private debugService: IDebugService
     ) {
         disposableRegistry.push(this);
         disposableRegistry.push(
-            workspace.onDidGrantWorkspaceTrust(() => {
-                disposeAllDisposables(this.activeCodeWatchers);
-                this.activeCodeWatchers = [];
+            vscode.workspace.onDidGrantWorkspaceTrust(() => {
+                this.activeCodeWatchers = dispose(this.activeCodeWatchers);
                 this.didChangeCodeLenses.fire();
             })
         );
         disposableRegistry.push(this.debugService.onDidChangeActiveDebugSession(this.onChangeDebugSession.bind(this)));
-        disposableRegistry.push(this.documentManager.onDidCloseTextDocument(this.onDidCloseTextDocument.bind(this)));
+        disposableRegistry.push(vscode.workspace.onDidCloseTextDocument(this.onDidCloseTextDocument.bind(this)));
         if (this.debugLocationTracker) {
             disposableRegistry.push(this.debugLocationTracker.updated(this.onDebugLocationUpdated.bind(this)));
         }
@@ -75,7 +60,8 @@ export class DataScienceCodeLensProvider implements IDataScienceCodeLensProvider
                 duration: this.totalExecutionTimeInMs / this.totalGetCodeLensCalls
             });
         }
-        disposeAllDisposables(this.activeCodeWatchers);
+
+        dispose(this.activeCodeWatchers);
     }
 
     public get onDidChangeCodeLenses(): vscode.Event<void> {
@@ -118,12 +104,6 @@ export class DataScienceCodeLensProvider implements IDataScienceCodeLensProvider
         const codeLenses = this.getCodeLens(document);
         this.totalExecutionTimeInMs += stopWatch.elapsedTime;
         this.totalGetCodeLensCalls += 1;
-
-        // Update the hasCodeCells context at the same time we are asked for codelens as VS code will
-        // ask whenever a change occurs. Do this regardless of if we have code lens turned on or not as
-        // shift+enter relies on this code context.
-        const editorContext = new ContextKey(EditorContexts.HasCodeCells, this.commandManager);
-        editorContext.set(codeLenses && codeLenses.length > 0).catch(noop);
 
         // Don't provide any code lenses if we have not enabled data science
         const settings = this.configuration.getSettings(document.uri);
@@ -168,7 +148,7 @@ export class DataScienceCodeLensProvider implements IDataScienceCodeLensProvider
                     return false;
                 });
             } else {
-                traceInfoIfCI(
+                logger.ci(
                     `Detected debugging context because activeDebugSession is name:"${this.debugService.activeDebugSession.name}", type: "${this.debugService.activeDebugSession.type}", ` +
                         `but fell through with debugLocation: ${JSON.stringify(
                             debugLocation
@@ -195,7 +175,7 @@ export class DataScienceCodeLensProvider implements IDataScienceCodeLensProvider
             return codeWatcher.getCodeLenses();
         }
 
-        traceVerbose(`Creating a new watcher for document ${document.uri}`);
+        logger.debug(`Creating a new watcher for document ${document.uri}`);
         const newCodeWatcher = this.createNewCodeWatcher(document);
         return newCodeWatcher.getCodeLenses();
     }
@@ -207,9 +187,9 @@ export class DataScienceCodeLensProvider implements IDataScienceCodeLensProvider
         }
 
         // Create a new watcher for this file if we can find a matching document
-        const possibleDocuments = this.documentManager.textDocuments.filter((d) => d.uri.toString() === uri.toString());
+        const possibleDocuments = vscode.workspace.textDocuments.filter((d) => d.uri.toString() === uri.toString());
         if (possibleDocuments && possibleDocuments.length > 0) {
-            traceVerbose(`creating new code watcher with matching document ${uri}`);
+            logger.debug(`creating new code watcher with matching document ${uri}`);
             return this.createNewCodeWatcher(possibleDocuments[0]);
         }
 

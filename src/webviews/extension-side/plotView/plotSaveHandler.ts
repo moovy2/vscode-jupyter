@@ -1,13 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { inject, injectable } from 'inversify';
-import { NotebookCellOutput, NotebookDocument, Uri } from 'vscode';
+import { NotebookCellOutput, NotebookDocument, Uri, window, workspace } from 'vscode';
 import * as path from '../../../platform/vscode-path/path';
-import { IApplicationShell, IWorkspaceService } from '../../../platform/common/application/types';
-import { traceError } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { getDisplayPath } from '../../../platform/common/platform/fs-paths';
 import { IFileSystem } from '../../../platform/common/platform/types';
 import { DataScience } from '../../../platform/common/utils/localize';
@@ -23,11 +20,7 @@ export const imageExtensionForMimeType: Record<string, string> = {
 
 @injectable()
 export class PlotSaveHandler implements IPlotSaveHandler {
-    constructor(
-        @inject(IApplicationShell) private readonly shell: IApplicationShell,
-        @inject(IFileSystem) private readonly fs: IFileSystem,
-        @inject(IWorkspaceService) private readonly workspace: IWorkspaceService
-    ) {}
+    constructor(@inject(IFileSystem) private readonly fs: IFileSystem) {}
 
     public async savePlot(notebook: NotebookDocument, outputId: string, mimeType: string) {
         if (notebook.isClosed) {
@@ -35,10 +28,12 @@ export class PlotSaveHandler implements IPlotSaveHandler {
         }
         const output = getOutputItem(notebook, outputId, mimeType);
         if (!output) {
-            return traceError(`No plot to save ${getDisplayPath(notebook.uri)}, id: ${outputId} for ${mimeType}`);
+            return logger.error(`No plot to save ${getDisplayPath(notebook.uri)}, id: ${outputId} for ${mimeType}`);
         }
         if (!(mimeType.toLowerCase() in imageExtensionForMimeType)) {
-            return traceError(`Unsupported MimeType ${getDisplayPath(notebook.uri)}, id: ${outputId} for ${mimeType}`);
+            return logger.error(
+                `Unsupported MimeType ${getDisplayPath(notebook.uri)}, id: ${outputId} for ${mimeType}`
+            );
         }
 
         const saveLocation = await this.getSaveTarget(output, mimeType);
@@ -56,22 +51,22 @@ export class PlotSaveHandler implements IPlotSaveHandler {
         const filters: Record<string, string[]> = {};
         // If we have an SVG, then we can export to PDF.
         if (output.items.find((item) => item.mime.toLowerCase() === svgMimeType)) {
-            filters[DataScience.pdfFilter()] = ['pdf'];
-            filters[DataScience.svgFilter()] = ['svg'];
+            filters[DataScience.pdfFilter] = ['pdf'];
+            filters[DataScience.svgFilter] = ['svg'];
         }
         if (imageExtension === 'png') {
-            filters[DataScience.pngFilter()] = ['png'];
+            filters[DataScience.pngFilter] = ['png'];
         }
         if (Object.keys(filters).length === 0) {
             filters['Images'] = [imageExtension];
         }
         const workspaceUri =
-            (this.workspace.workspaceFolders?.length || 0) > 0 ? this.workspace.workspaceFolders![0].uri : undefined;
-        const fileName = `output.${imageExtension}`;
+            (workspace.workspaceFolders?.length || 0) > 0 ? workspace.workspaceFolders![0].uri : undefined;
+        const fileName = `output`;
         const defaultUri = workspaceUri ? Uri.joinPath(workspaceUri, fileName) : Uri.file(fileName);
-        return this.shell.showSaveDialog({
+        return window.showSaveDialog({
             defaultUri,
-            saveLabel: DataScience.exportPlotTitle(),
+            saveLabel: DataScience.exportPlotTitle,
             filters
         });
     }
@@ -90,11 +85,11 @@ export class PlotSaveHandler implements IPlotSaveHandler {
             );
         }
 
-        await this.fs.writeFile(target, Buffer.from(data.data));
+        await this.fs.writeFile(target, data.data);
     }
 
     protected async saveAsPdf(_output: NotebookCellOutput, _target: Uri) {
-        return traceError(`Save as PDF is not yet supported on the web.`);
+        return logger.error(`Save as PDF is not yet supported on the web.`);
     }
 }
 

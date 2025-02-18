@@ -3,7 +3,7 @@
 
 import { EventEmitter } from 'events';
 import { Container, decorate, injectable, interfaces } from 'inversify';
-import { traceWarning } from '../logging';
+import { logger } from '../logging';
 import { Abstract, IServiceContainer, Newable } from './types';
 
 // This needs to be done once, hence placed in a common location.
@@ -13,7 +13,7 @@ import { Abstract, IServiceContainer, Newable } from './types';
 try {
     decorate(injectable(), EventEmitter);
 } catch (ex) {
-    traceWarning('Failed to decorate EventEmitter for DI (possibly already decorated by another Extension)', ex);
+    logger.warn('Failed to decorate EventEmitter for DI (possibly already decorated by another Extension)', ex);
 }
 
 /**
@@ -21,7 +21,13 @@ try {
  */
 @injectable()
 export class ServiceContainer implements IServiceContainer {
-    constructor(private container: Container) {}
+    public static get instance(): IServiceContainer {
+        return ServiceContainer._instance;
+    }
+    private static _instance: IServiceContainer;
+    constructor(private container: Container) {
+        ServiceContainer._instance = this;
+    }
     public get<T>(serviceIdentifier: interfaces.ServiceIdentifier<T>, name?: string | number | symbol): T {
         return name ? this.container.getNamed<T>(serviceIdentifier, name) : this.container.get<T>(serviceIdentifier);
     }

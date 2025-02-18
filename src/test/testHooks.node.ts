@@ -2,32 +2,27 @@
 // Licensed under the MIT License.
 
 import { Context } from 'mocha';
-import { AppinsightsKey, JVSC_EXTENSION_ID, Telemetry } from '../platform/common/constants';
-import TelemetryReporter from '@vscode/extension-telemetry/lib/telemetryReporter';
+import { AppinsightsKey, Telemetry } from '../platform/common/constants';
+import TelemetryReporter from '@vscode/extension-telemetry';
 import { IS_CI_SERVER } from './ciConstants.node';
-import { extensions } from 'vscode';
 import { sleep } from '../platform/common/utils/async';
-import { traceInfoIfCI } from '../platform/logging';
+import { logger } from '../platform/logging';
 
 let telemetryReporter: TelemetryReporter;
 
 export const rootHooks: Mocha.RootHookObject = {
     beforeAll() {
-        traceInfoIfCI(`Environment Variable dump: ${JSON.stringify(process.env)}`);
+        logger.ci(`Environment Variable dump: ${JSON.stringify(process.env)}`);
         if (!IS_CI_SERVER) {
             return;
         }
 
-        const extensionId = JVSC_EXTENSION_ID;
-        const extension = extensions.getExtension(extensionId)!;
-        const extensionVersion = extension.packageJSON.version;
-
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const reporter = require('@vscode/extension-telemetry').default as typeof TelemetryReporter;
-        telemetryReporter = new reporter(extensionId, extensionVersion, AppinsightsKey, true);
+        telemetryReporter = new reporter(AppinsightsKey);
     },
     afterEach(this: Context) {
-        traceInfoIfCI('Root afterEach');
+        logger.ci('Root afterEach');
         if (
             !IS_CI_SERVER ||
             !process.env.GITHUB_REF_NAME ||
@@ -46,15 +41,11 @@ export const rootHooks: Mocha.RootHookObject = {
             testResult: result
         };
 
-        if (this.currentTest?.perfCheckpoints) {
-            dimensions = { ...dimensions, timedCheckpoints: JSON.stringify(this.currentTest?.perfCheckpoints) };
-        }
-
         if (process.env.GITHUB_SHA) {
             dimensions = { ...dimensions, commitHash: process.env.GITHUB_SHA };
         }
 
-        traceInfoIfCI(`Sending telemetry event ${Telemetry.RunTest} with dimensions ${JSON.stringify(dimensions)}`);
+        logger.ci(`Sending telemetry event ${Telemetry.RunTest} with dimensions ${JSON.stringify(dimensions)}`);
         telemetryReporter.sendDangerousTelemetryEvent(Telemetry.RunTest, dimensions, measures);
     },
     afterAll: async () => {

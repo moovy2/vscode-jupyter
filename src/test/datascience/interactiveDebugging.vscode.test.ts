@@ -1,16 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import * as path from '../../platform/vscode-path/path';
 import * as fs from 'fs-extra';
-import { EXTENSION_ROOT_DIR } from '../../platform/constants.node';
 import { DebuggerType, sharedIWDebuggerTests } from './interactiveDebugging.vscode.common';
+import { EXTENSION_ROOT_DIR_FOR_TESTS } from '../constants.node';
 
 /* eslint-disable @typescript-eslint/no-explicit-any, no-invalid-this */
-suite('Interactive Window Debugging', function () {
-    const settingsFile = path.join(EXTENSION_ROOT_DIR, 'src', 'test', 'datascience', '.vscode', 'settings.json');
+suite('Interactive Window Debugging @debugger', function () {
+    const settingsFile = path.join(
+        EXTENSION_ROOT_DIR_FOR_TESTS,
+        'src',
+        'test',
+        'datascience',
+        '.vscode',
+        'settings.json'
+    );
     async function enableJupyterDebugger(debuggerType: DebuggerType) {
         const enable = debuggerType === 'JupyterProtocolDebugger';
         const settingFileContents = fs.readFileSync(settingsFile).toString();

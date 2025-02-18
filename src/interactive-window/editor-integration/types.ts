@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { Event, CodeLens, CodeLensProvider, Uri, TextEditor, Range, TextDocument, NotebookDocument } from 'vscode';
 import { ICellRange, IDisposable } from '../../platform/common/types';
 
@@ -63,6 +61,12 @@ export interface ICodeLensFactory {
     createCodeLenses(document: TextDocument): CodeLens[];
     getCellRanges(document: TextDocument): ICellRange[];
     getPerfMeasures(): CodeLensPerfMeasures;
+}
+
+export const ICellRangeCache = Symbol('ICellRangeCache');
+export interface ICellRangeCache extends IDisposable {
+    clear(): void;
+    getCellRanges(document: TextDocument): ICellRange[];
 }
 
 export interface IGeneratedCode {

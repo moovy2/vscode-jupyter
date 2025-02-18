@@ -1,74 +1,32 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import type * as nbformat from '@jupyterlab/nbformat';
 import { assert } from 'chai';
 import * as sinon from 'sinon';
 import { anything, instance, mock, when } from 'ts-mockito';
-import { CommandManager } from '../../platform/common/application/commandManager';
-import { DocumentManager } from '../../platform/common/application/documentManager';
-import { IDocumentManager, IWorkspaceService } from '../../platform/common/application/types';
-import { WorkspaceService } from '../../platform/common/application/workspace.node';
 import { JupyterSettings } from '../../platform/common/configSettings';
 import { ConfigurationService } from '../../platform/common/configuration/service.node';
 import { IConfigurationService, IWatchableJupyterSettings } from '../../platform/common/types';
-import { GlobalActivation } from '../../standalone/activation/globalActivation';
 import { RawNotebookSupportedService } from '../../kernels/raw/session/rawNotebookSupportedService.node';
 import { IRawNotebookSupportedService } from '../../kernels/raw/types';
 import { pruneCell } from '../../platform/common/utils';
 
 /* eslint-disable  */
-suite('DataScience Tests', () => {
-    let dataScience: GlobalActivation;
-    let cmdManager: CommandManager;
+suite('Tests', () => {
     let configService: IConfigurationService;
-    let docManager: IDocumentManager;
-    let workspaceService: IWorkspaceService;
     let settings: IWatchableJupyterSettings;
     let onDidChangeSettings: sinon.SinonStub;
-    let onDidChangeActiveTextEditor: sinon.SinonStub;
     let rawNotebookSupported: IRawNotebookSupportedService;
     setup(() => {
-        cmdManager = mock(CommandManager);
         configService = mock(ConfigurationService);
-        workspaceService = mock(WorkspaceService);
-        docManager = mock(DocumentManager);
         settings = mock(JupyterSettings);
         rawNotebookSupported = mock(RawNotebookSupportedService);
 
-        dataScience = new GlobalActivation(
-            instance(cmdManager),
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            [] as any,
-            instance(configService),
-            instance(docManager),
-            instance(workspaceService),
-            instance(rawNotebookSupported),
-            [] as any
-        );
-
         onDidChangeSettings = sinon.stub();
-        onDidChangeActiveTextEditor = sinon.stub();
         when(configService.getSettings(anything())).thenReturn(instance(settings));
         when(settings.onDidChange).thenReturn(onDidChangeSettings);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        when(docManager.onDidChangeActiveTextEditor).thenReturn(onDidChangeActiveTextEditor);
         when(rawNotebookSupported.isSupported).thenReturn(true);
-    });
-
-    suite('Activate', () => {
-        setup(async () => {
-            await dataScience.activate();
-        });
-
-        test('Should add handler for Settings Changed', async () => {
-            assert.ok(onDidChangeSettings.calledOnce);
-        });
-        test('Should add handler for ActiveTextEditorChanged', async () => {
-            assert.ok(onDidChangeActiveTextEditor.calledOnce);
-        });
     });
 
     suite('Cell pruning', () => {

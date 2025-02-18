@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { IKernel } from '../../../../kernels/types';
 import {
     IIPyWidgetScriptManagerFactory,
@@ -19,6 +17,7 @@ import {
  * <python folder>/share/jupyter/nbextensions/bqplot/index.js
  */
 export class LocalWidgetScriptSourceProvider implements IWidgetScriptSourceProvider {
+    id = 'local';
     constructor(
         private readonly kernel: IKernel,
         private readonly localResourceUriConverter: ILocalResourceUriConverter,

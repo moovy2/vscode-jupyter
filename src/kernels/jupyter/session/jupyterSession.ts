@@ -1,346 +1,219 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import type { Contents, ContentsManager, KernelSpecManager, Session, SessionManager } from '@jupyterlab/services';
-import uuid from 'uuid/v4';
-import { CancellationToken, CancellationTokenSource } from 'vscode-jsonrpc';
-import { Cancellation } from '../../../platform/common/cancellation';
-import { BaseError } from '../../../platform/errors/types';
-import { traceVerbose, traceError, traceInfo } from '../../../platform/logging';
-import { Resource, IOutputChannel, IDisplayOptions } from '../../../platform/common/types';
-import { waitForCondition } from '../../../platform/common/utils/async';
-import { DataScience } from '../../../platform/common/utils/localize';
-import { JupyterInvalidKernelError } from '../../errors/jupyterInvalidKernelError';
-import { SessionDisposedError } from '../../../platform/errors/sessionDisposedError';
-import { capturePerfTelemetry, Telemetry } from '../../../telemetry';
-import { BaseJupyterSession, JupyterSessionStartError } from '../../common/baseJupyterSession';
-import { getNameOfKernelConnection } from '../../helpers';
+import type { KernelMessage, Session } from '@jupyterlab/services';
+import { CancellationError, CancellationToken, CancellationTokenSource, Uri } from 'vscode';
+import { logger } from '../../../platform/logging';
+import { Resource, IDisposable } from '../../../platform/common/types';
+import { raceTimeout } from '../../../platform/common/utils/async';
+import { suppressShutdownErrors } from '../../common/baseJupyterSession';
 import {
     KernelConnectionMetadata,
     isLocalConnection,
     IJupyterConnection,
-    ISessionWithSocket,
     KernelActionSource,
-    IJupyterKernelConnectionSession
+    IJupyterKernelSession,
+    isRemoteConnection
 } from '../../types';
 import { DisplayOptions } from '../../displayOptions';
-import { IBackupFile, IJupyterBackingFileCreator, IJupyterKernelService, IJupyterRequestCreator } from '../types';
-import { CancellationError, Uri } from 'vscode';
-import { generateBackingIPyNbFileName } from './backingFileCreator.base';
+import { IJupyterKernelService } from '../types';
 import { noop } from '../../../platform/common/utils/misc';
+import { getResourceType } from '../../../platform/common/utils';
+import { waitForIdleOnSession } from '../../common/helpers';
+import { BaseJupyterSessionConnection } from '../../common/baseJupyterSessionConnection';
+import { dispose } from '../../../platform/common/utils/lifecycle';
+import { JVSC_EXTENSION_ID } from '../../../platform/common/constants';
 
-// function is
-export class JupyterSession extends BaseJupyterSession implements IJupyterKernelConnectionSession {
-    public readonly kind: 'remoteJupyter' | 'localJupyter';
+export class JupyterSessionWrapper
+    extends BaseJupyterSessionConnection<Session.ISessionConnection, 'localJupyter' | 'remoteJupyter'>
+    implements IJupyterKernelSession
+{
+    public get status(): KernelMessage.Status {
+        if (this.isDisposed) {
+            return 'dead';
+        }
+        if (this.session?.kernel) {
+            return this.session.kernel.status;
+        }
+        logger.ci(
+            `Kernel status not started because real session is ${
+                this.session ? 'defined' : 'undefined'
+            } & real kernel is ${this.session?.kernel ? 'defined' : 'undefined'}`
+        );
+        return 'unknown';
+    }
+    private restartToken?: CancellationTokenSource;
 
     constructor(
-        resource: Resource,
-        private connInfo: IJupyterConnection,
-        kernelConnectionMetadata: KernelConnectionMetadata,
-        private specsManager: KernelSpecManager,
-        private sessionManager: SessionManager,
-        private contentsManager: ContentsManager,
-        private readonly outputChannel: IOutputChannel,
-        override readonly workingDirectory: Uri,
-        private readonly idleTimeout: number,
+        session: Session.ISessionConnection,
+        private readonly resource: Resource,
+        private readonly kernelConnectionMetadata: KernelConnectionMetadata,
         private readonly kernelService: IJupyterKernelService | undefined,
-        interruptTimeout: number,
-        private readonly backingFileCreator: IJupyterBackingFileCreator,
-        private readonly requestCreator: IJupyterRequestCreator,
-        private readonly sessionCreator: KernelActionSource
+        private readonly creator: KernelActionSource
     ) {
-        super(resource, kernelConnectionMetadata, workingDirectory, interruptTimeout);
-        this.kind = connInfo.localLaunch ? 'localJupyter' : 'remoteJupyter';
+        super(isLocalConnection(kernelConnectionMetadata) ? 'localJupyter' : 'remoteJupyter', session);
+        this.initializeKernelSocket();
     }
 
-    public override isServerSession(): this is IJupyterKernelConnectionSession {
+    public override dispose() {
+        this.restartToken?.cancel();
+        this.restartToken?.dispose();
+        void this.shutdownImplementation(false).finally(() => super.dispose());
+    }
+    public async waitForIdle(timeout: number, token: CancellationToken): Promise<void> {
+        try {
+            await waitForIdleOnSession(this.kernelConnectionMetadata, this.resource, this.session, timeout, token);
+        } catch (ex) {
+            logger.ci(`Error waiting for idle`, ex);
+            await this.shutdown().catch(noop);
+            throw ex;
+        }
+    }
+    public override async restart(): Promise<void> {
+        const disposables: IDisposable[] = [];
+        const token = new CancellationTokenSource();
+        this.restartToken = token;
+        const ui = new DisplayOptions(false);
+        disposables.push(ui);
+        disposables.push(token);
+        try {
+            await this.validateLocalKernelDependencies(token.token, ui);
+            await super.restart();
+        } finally {
+            dispose(disposables);
+        }
+    }
+    private async validateLocalKernelDependencies(token: CancellationToken, ui: DisplayOptions) {
+        if (
+            !this.kernelConnectionMetadata?.interpreter ||
+            !isLocalConnection(this.kernelConnectionMetadata) ||
+            !this.kernelService
+        ) {
+            return;
+        }
+        if (token.isCancellationRequested) {
+            throw new CancellationError();
+        }
+        // Make sure the kernel has ipykernel installed if on a local machine.
+        // When using a Jupyter server to start kernels locally
+        // we need to ensure ipykernel is still available before we attempt to restart a kernel.
+        // Its possible for some reason that users uninstalled ipykernel or its in a broken state
+        // Hence we need to validate the env before we can restart the kernel.
+        // In the past users got into a state where ipykernel was no longer properly installed
+        // after the kernel was started.
+        await this.kernelService.ensureKernelIsUsable(
+            this.resource,
+            this.kernelConnectionMetadata,
+            ui,
+            token,
+            this.creator === '3rdPartyExtension'
+        );
+    }
+
+    public override async shutdown(): Promise<void> {
+        this.restartToken?.cancel();
+        this.restartToken?.dispose();
+        return this.shutdownImplementation(true);
+    }
+
+    private isShuttingDown = false;
+    private async shutdownImplementation(shutdownEvenIfRemote?: boolean) {
+        if (this.isDisposed || this.isShuttingDown) {
+            return;
+        }
+        this.isShuttingDown = true;
+        // We are only interested in our stack, not in VS Code or others.
+        const stack = (new Error().stack || '').split('\n').filter((l) => l.includes(JVSC_EXTENSION_ID));
+        logger.trace(`Shutdown session - current session, called from \n ${stack.map((l) => `    ${l}`).join('\n')}`);
+        const kernelIdForLogging = `${this.session.kernel?.id}, ${this.kernelConnectionMetadata.id}`;
+        logger.debug(`shutdownSession ${kernelIdForLogging} - start`);
+        try {
+            if (shutdownEvenIfRemote || this.canShutdownSession()) {
+                try {
+                    logger.debug(`Session can be shutdown ${this.kernelConnectionMetadata.id}`);
+                    suppressShutdownErrors(this.session.kernel);
+                    // Shutdown may fail if the process has been killed
+                    if (!this.session.isDisposed) {
+                        await raceTimeout(1000, this.session.shutdown().catch(noop));
+                    }
+                } catch {
+                    // If session.shutdown didn't work, just dispose
+                    try {
+                        // If session.shutdown didn't work, just dispose
+                        if (!this.session.isDisposed) {
+                            this.session.dispose();
+                        }
+                    } catch (e) {
+                        logger.warn('Failures in disposing the session', e);
+                    }
+                } finally {
+                    this.didShutdown.fire();
+                }
+            } else {
+                logger.debug(`Session cannot be shutdown ${this.kernelConnectionMetadata.id}`);
+            }
+            try {
+                // If session.shutdown didn't work, just dispose
+                if (!this.session.isDisposed) {
+                    this.session.dispose();
+                }
+            } catch (e) {
+                logger.warn('Failures in disposing the session', e);
+            }
+            super.dispose();
+            logger.trace('Shutdown session -- complete');
+        } catch (e) {
+            logger.warn('Failures in disposing the session', e);
+        }
+        logger.debug(`shutdownSession ${kernelIdForLogging} - shutdown complete`);
+    }
+    private canShutdownSession(): boolean {
+        if (isLocalConnection(this.kernelConnectionMetadata)) {
+            return true;
+        }
+        // We can never shut down existing (live) kernels.
+        if (this.kernelConnectionMetadata.kind === 'connectToLiveRemoteKernel') {
+            return false;
+        }
+        // If this Interactive Window, then always shutdown sessions (even with remote Jupyter).
+        if (this.resource && getResourceType(this.resource) === 'interactive') {
+            return true;
+        }
+        // If we're in notebooks and using Remote Jupyter connections, then never shutdown the sessions.
+        if (
+            this.resource &&
+            getResourceType(this.resource) === 'notebook' &&
+            isRemoteConnection(this.kernelConnectionMetadata)
+        ) {
+            return false;
+        }
+
         return true;
     }
+}
 
-    @capturePerfTelemetry(Telemetry.WaitForIdleJupyter)
-    public waitForIdle(timeout: number, token: CancellationToken): Promise<void> {
-        // Wait for idle on this session
-        return this.waitForIdleOnSession(this.session, timeout, token);
-    }
-    public async connect(options: { token: CancellationToken; ui: IDisplayOptions }): Promise<void> {
-        // Start a new session
-        this.setSession(await this.createNewKernelSession(options));
-
-        // Listen for session status changes
-        this.session?.statusChanged.connect(this.statusHandler); // NOSONAR
-
-        // Made it this far, we're connected now
-        this.connected = true;
-    }
-
-    public async createNewKernelSession(options: {
-        token: CancellationToken;
-        ui: IDisplayOptions;
-    }): Promise<ISessionWithSocket> {
-        let newSession: ISessionWithSocket | undefined;
-        try {
-            // Don't immediately assume this kernel is valid. Try creating a session with it first.
-            if (
-                this.kernelConnectionMetadata &&
-                this.kernelConnectionMetadata.kind === 'connectToLiveRemoteKernel' &&
-                this.kernelConnectionMetadata.kernelModel.id &&
-                this.kernelConnectionMetadata.kernelModel.model
-            ) {
-                // Remote case.
-                newSession = this.sessionManager.connectTo({
-                    ...this.kernelConnectionMetadata.kernelModel,
-                    model: this.kernelConnectionMetadata.kernelModel.model
-                }) as ISessionWithSocket;
-                newSession.kernelConnectionMetadata = this.kernelConnectionMetadata;
-                newSession.kernelSocketInformation = {
-                    socket: this.requestCreator.getWebsocket(this.kernelConnectionMetadata.id),
-                    options: {
-                        clientId: '',
-                        id: this.kernelConnectionMetadata.id,
-                        model: { ...this.kernelConnectionMetadata.kernelModel.model },
-                        userName: ''
-                    }
-                };
-                newSession.isRemoteSession = true;
-                newSession.resource = this.resource;
-
-                // newSession.kernel?.connectionStatus
-                await waitForCondition(
-                    async () =>
-                        newSession?.kernel?.connectionStatus === 'connected' || options.token.isCancellationRequested,
-                    this.idleTimeout,
-                    100
-                );
-                if (options.token.isCancellationRequested) {
-                    throw new CancellationError();
-                }
-            } else {
-                traceVerbose(`createNewKernelSession ${this.kernelConnectionMetadata?.id}`);
-                newSession = await this.createSession(options);
-                newSession.resource = this.resource;
-
-                // Make sure it is idle before we return
-                await this.waitForIdleOnSession(newSession, this.idleTimeout, options.token);
-            }
-        } catch (exc) {
-            // Don't log errors if UI is disabled (e.g. auto starting a kernel)
-            // Else we just pollute the logs with lots of noise.
-            const loggerFn = options.ui.disableUI ? traceVerbose : traceError;
-            // Don't swallow known exceptions.
-            if (exc instanceof BaseError) {
-                loggerFn('Failed to change kernel, re-throwing', exc);
-                throw exc;
-            } else {
-                loggerFn('Failed to change kernel', exc);
-                // Throw a new exception indicating we cannot change.
-                throw new JupyterInvalidKernelError(this.kernelConnectionMetadata);
-            }
-        }
-
-        return newSession;
-    }
-    protected async createRestartSession(
-        disableUI: boolean,
-        session: ISessionWithSocket,
-        cancelToken: CancellationToken
-    ): Promise<ISessionWithSocket> {
-        // We need all of the above to create a restart session
-        if (!session || !this.contentsManager || !this.sessionManager) {
-            throw new SessionDisposedError();
-        }
-        let result: ISessionWithSocket | undefined;
-        let tryCount = 0;
-        const ui = new DisplayOptions(disableUI);
-        try {
-            traceVerbose(
-                `JupyterSession.createNewKernelSession ${tryCount}, id is ${this.kernelConnectionMetadata?.id}`
-            );
-            result = await this.createSession({ token: cancelToken, ui });
-            await this.waitForIdleOnSession(result, this.idleTimeout, cancelToken);
-            return result;
-        } catch (exc) {
-            traceInfo(`Error waiting for restart session: ${exc}`);
-            if (result) {
-                this.shutdownSession(result, undefined, true).ignoreErrors();
-            }
-            result = undefined;
-            throw exc;
-        } finally {
-            ui.dispose();
-        }
-    }
-
-    protected startRestartSession(disableUI: boolean) {
-        if (!this.session) {
-            throw new Error('Session disposed or not initialized');
-        }
-        const token = new CancellationTokenSource();
-        const promise = this.createRestartSession(disableUI, this.session, token.token);
-        this.restartSessionPromise = { token, promise };
-        promise
-            .finally(() => {
-                token.dispose();
-                if (this.restartSessionPromise?.promise === promise) {
-                    this.restartSessionPromise = undefined;
-                }
-            })
-            .catch(noop);
-        return promise;
-    }
-
-    async invokeWithFileSynced(contents: string, handler: (file: IBackupFile) => Promise<void>): Promise<void> {
-        if (!this.resource) {
-            return;
-        }
-
-        const backingFile = await this.backingFileCreator.createBackingFile(
-            this.resource,
-            this.workingDirectory,
-            this.kernelConnectionMetadata,
-            this.connInfo,
-            this.contentsManager
-        );
-
-        if (!backingFile) {
-            return;
-        }
-
-        await this.contentsManager
-            .save(backingFile!.filePath, {
-                content: JSON.parse(contents),
-                type: 'notebook'
-            })
-            .ignoreErrors();
-
-        await handler({
-            filePath: backingFile.filePath,
-            dispose: backingFile.dispose.bind(backingFile)
-        });
-
-        await backingFile.dispose();
-        await this.contentsManager.delete(backingFile.filePath).ignoreErrors();
-    }
-
-    async createTempfile(ext: string): Promise<string> {
-        const tempFile = await this.contentsManager.newUntitled({ type: 'file', ext });
-        return tempFile.path;
-    }
-
-    async deleteTempfile(file: string): Promise<void> {
-        await this.contentsManager.delete(file);
-    }
-
-    async getContents(file: string, format: Contents.FileFormat): Promise<Contents.IModel> {
-        const data = await this.contentsManager.get(file, { type: 'file', format: format, content: true });
-        return data;
-    }
-
-    private async createSession(options: {
-        token: CancellationToken;
-        ui: IDisplayOptions;
-    }): Promise<ISessionWithSocket> {
-        // Create our backing file for the notebook
-        const backingFile = await this.backingFileCreator.createBackingFile(
-            this.resource,
-            this.workingDirectory,
-            this.kernelConnectionMetadata,
-            this.connInfo,
-            this.contentsManager
-        );
-
-        // Make sure the kernel has ipykernel installed if on a local machine.
-        if (
-            this.kernelConnectionMetadata?.interpreter &&
-            isLocalConnection(this.kernelConnectionMetadata) &&
-            this.kernelService
-        ) {
-            // Make sure the kernel actually exists and is up to date.
-            try {
-                await this.kernelService.ensureKernelIsUsable(
-                    this.resource,
-                    this.kernelConnectionMetadata,
-                    options.ui,
-                    options.token,
-                    this.sessionCreator === '3rdPartyExtension'
-                );
-            } catch (ex) {
-                // If we failed to create the kernel, we need to clean up the file.
-                if (this.connInfo && backingFile) {
-                    this.contentsManager.delete(backingFile.filePath).ignoreErrors();
-                }
-                throw ex;
-            }
-        }
-
-        // If kernelName is empty this can cause problems for servers that don't
-        // understand that empty kernel name means the default kernel.
-        // See https://github.com/microsoft/vscode-jupyter/issues/5290
-        const kernelName =
-            getNameOfKernelConnection(this.kernelConnectionMetadata) ?? this.specsManager?.specs?.default ?? '';
-
-        // Create our session options using this temporary notebook and our connection info
-        const sessionOptions: Session.ISessionOptions = {
-            path: backingFile?.filePath || generateBackingIPyNbFileName(this.resource), // Name has to be unique
-            kernel: {
-                name: kernelName
-            },
-            name: uuid(), // This is crucial to distinguish this session from any other.
-            type: 'notebook'
-        };
-
-        const requestCreator = this.requestCreator;
-
-        return Cancellation.race(
-            () =>
-                this.sessionManager!.startNew(sessionOptions, {
-                    kernelConnectionOptions: {
-                        handleComms: true // This has to be true for ipywidgets to work
-                    }
-                })
-                    .then(async (session) => {
-                        if (session.kernel) {
-                            this.logRemoteOutput(
-                                DataScience.createdNewKernel().format(this.connInfo.baseUrl, session?.kernel?.id || '')
-                            );
-                            const sessionWithSocket = session as ISessionWithSocket;
-
-                            // Add on the kernel metadata & sock information
-                            sessionWithSocket.resource = this.resource;
-                            sessionWithSocket.kernelConnectionMetadata = this.kernelConnectionMetadata;
-                            sessionWithSocket.kernelSocketInformation = {
-                                get socket() {
-                                    // When we restart kernels, a new websocket is created and we need to get the new one.
-                                    // & the id in the dictionary is the kernel.id.
-                                    return requestCreator.getWebsocket(session.kernel!.id);
-                                },
-                                options: {
-                                    clientId: session.kernel.clientId,
-                                    id: session.kernel.id,
-                                    model: { ...session.kernel.model },
-                                    userName: session.kernel.username
-                                }
-                            };
-                            if (!isLocalConnection(this.kernelConnectionMetadata)) {
-                                sessionWithSocket.isRemoteSession = true;
-                            }
-                            return sessionWithSocket;
-                        }
-                        throw new JupyterSessionStartError(new Error(`No kernel created`));
-                    })
-                    .catch((ex) => Promise.reject(new JupyterSessionStartError(ex)))
-                    .finally(async () => {
-                        if (this.connInfo && backingFile) {
-                            this.contentsManager.delete(backingFile.filePath).ignoreErrors();
-                        }
-                    }),
-            options.token
-        );
-    }
-
-    private logRemoteOutput(output: string) {
-        if (!isLocalConnection(this.kernelConnectionMetadata)) {
-            this.outputChannel.appendLine(output);
-        }
-    }
+export function getRemoteSessionOptions(
+    _remoteConnection: IJupyterConnection,
+    _resource?: Uri
+): Pick<Session.ISessionOptions, 'path' | 'name'> | undefined | void {
+    // if (!resource || resource.scheme === 'untitled' || !remoteConnection.mappedRemoteNotebookDir) {
+    //     return;
+    // }
+    // // Get Uris of both, local and remote files.
+    // // Convert Uris to strings to Uri again, as its possible the Uris are not always compatible.
+    // // E.g. one could be dealing with custom file system providers.
+    // const filePath = Uri.file(resource.path);
+    // const mappedLocalPath = Uri.file(remoteConnection.mappedRemoteNotebookDir);
+    // if (!path.isEqualOrParent(filePath, mappedLocalPath)) {
+    //     return;
+    // }
+    // const sessionPath = path.relativePath(mappedLocalPath, filePath);
+    // // If we have mapped the local dir to the remote dir, then we need to use the name of the file.
+    // const sessionName = path.basename(resource);
+    // if (sessionName && sessionPath) {
+    //     return {
+    //         path: sessionPath,
+    //         name: sessionName
+    //     };
+    // }
 }

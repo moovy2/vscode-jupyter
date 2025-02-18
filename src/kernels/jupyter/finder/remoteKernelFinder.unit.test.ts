@@ -3,75 +3,55 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-'use strict';
-
+import * as sinon from 'sinon';
 import type { Session } from '@jupyterlab/services';
 import { assert } from 'chai';
-import { anything, instance, mock, when, verify } from 'ts-mockito';
+import { anything, instance, mock, verify, when } from 'ts-mockito';
 import { getDisplayNameOrNameOfKernelConnection } from '../../helpers';
-import { PYTHON_LANGUAGE } from '../../../platform/common/constants';
-import { Disposable, EventEmitter, Memento, Uri } from 'vscode';
+import { Disposable, EventEmitter, Uri } from 'vscode';
 import { CryptoUtils } from '../../../platform/common/crypto';
-import { noop } from '../../../test/core';
+import { noop, sleep } from '../../../test/core';
 import {
     IJupyterConnection,
     IJupyterKernelSpec,
     IKernelProvider,
     KernelConnectionMetadata,
-    LiveRemoteKernelConnectionMetadata
+    LiveRemoteKernelConnectionMetadata,
+    RemoteKernelSpecConnectionMetadata
 } from '../../types';
-import { IInterpreterService } from '../../../platform/interpreter/contracts';
-import { JupyterSessionManager } from '../session/jupyterSessionManager';
-import { JupyterSessionManagerFactory } from '../session/jupyterSessionManagerFactory';
-import { RemoteKernelFinder } from './remoteKernelFinder';
-import { ILocalKernelFinder } from '../../raw/types';
-import { ActiveKernelIdList, PreferredRemoteKernelIdProvider } from '../preferredRemoteKernelIdProvider';
-import {
-    IJupyterKernel,
-    IJupyterRemoteCachedKernelValidator,
-    IJupyterSessionManager,
-    IServerConnectionType
-} from '../types';
+import { IJupyterKernel, IJupyterRemoteCachedKernelValidator } from '../types';
 import { KernelFinder } from '../../kernelFinder';
-import { NotebookProvider } from '../launcher/notebookProvider';
-import { PythonExtensionChecker } from '../../../platform/api/pythonApi';
-import { LocalKernelFinder } from '../../raw/finder/localKernelFinder.node';
-import { IFileSystemNode } from '../../../platform/common/platform/types.node';
-import { JupyterServerUriStorage } from '../launcher/serverUriStorage';
-import { FileSystem } from '../../../platform/common/platform/fileSystem.node';
 import { IApplicationEnvironment } from '../../../platform/common/application/types';
-import { RemoteKernelSpecsCacheKey } from '../../common/commonFinder';
-import { IKernelRankingHelper } from '../../../notebooks/controllers/types';
-import { KernelRankingHelper } from '../../../notebooks/controllers/kernelRanking/kernelRankingHelper';
-import { IExtensions } from '../../../platform/common/types';
-import { takeTopRankKernel } from '../../raw/finder/localKernelFinder.unit.test';
+import { IExtensionContext } from '../../../platform/common/types';
 import { createEventHandler, TestEventHandler } from '../../../test/common';
+import { CacheDataFormat, RemoteKernelFinder } from './remoteKernelFinder';
+import { JupyterConnection } from '../connection/jupyterConnection';
+import { dispose } from '../../../platform/common/utils/lifecycle';
+import { generateIdFromRemoteProvider } from '../jupyterUtils';
+import { IFileSystem } from '../../../platform/common/platform/types';
+import { resolvableInstance, uriEquals } from '../../../test/datascience/helpers';
+import { RemoteKernelSpecCacheFileName } from '../constants';
+import { JupyterLabHelper } from '../session/jupyterLabHelper';
 
 suite(`Remote Kernel Finder`, () => {
     let disposables: Disposable[] = [];
-    let preferredRemoteKernelIdProvider: PreferredRemoteKernelIdProvider;
     let remoteKernelFinder: RemoteKernelFinder;
-    let localKernelFinder: ILocalKernelFinder;
     let kernelFinder: KernelFinder;
-    let kernelRankHelper: IKernelRankingHelper;
-    let fs: IFileSystemNode;
-    let memento: Memento;
-    let jupyterSessionManager: IJupyterSessionManager;
-    const dummyEvent = new EventEmitter<number>();
-    let interpreterService: IInterpreterService;
+    let fs: IFileSystem;
+    let jupyterSessionManager: JupyterLabHelper;
     let cachedRemoteKernelValidator: IJupyterRemoteCachedKernelValidator;
     let kernelsChanged: TestEventHandler<void>;
+    let jupyterConnection: JupyterConnection;
     const connInfo: IJupyterConnection = {
-        url: 'http://foobar',
-        type: 'jupyter',
-        localLaunch: false,
         baseUrl: 'http://foobar',
         displayName: 'foobar connection',
-        disconnected: dummyEvent.event,
         token: '',
+        providerId: 'a',
         hostName: 'foobar',
         rootDirectory: Uri.file('.'),
-        dispose: noop
+        dispose: noop,
+        serverProviderHandle: { handle: 'handle', id: 'id', extensionId: '' },
+        settings: {} as any
     };
     const defaultPython3Name = 'python3';
     const python3spec: IJupyterKernelSpec = {
@@ -123,80 +103,77 @@ suite(`Remote Kernel Finder`, () => {
             }
         };
     });
+    const globalStorageUri = Uri.file('globalStorage');
+    const serverEntry = {
+        uri: connInfo.baseUrl,
+        time: Date.now(),
+        isValidated: true,
+        provider: {
+            id: '1',
+            handle: '2',
+            extensionId: ''
+        }
+    };
 
     setup(() => {
-        memento = mock<Memento>();
-        when(memento.get(anything(), anything())).thenCall((key: string, defaultValue: unknown) => {
-            if (key === ActiveKernelIdList) {
-                return [];
-            }
-            return defaultValue;
-        });
+        const context = mock<IExtensionContext>();
+        when(context.globalStorageUri).thenReturn(globalStorageUri);
+        fs = mock<IFileSystem>();
         const crypto = mock(CryptoUtils);
         when(crypto.createHash(anything(), anything())).thenCall((d, _c) => {
             return Promise.resolve(d.toLowerCase());
         });
-        preferredRemoteKernelIdProvider = new PreferredRemoteKernelIdProvider(instance(memento), instance(crypto));
-        jupyterSessionManager = mock(JupyterSessionManager);
-        const jupyterSessionManagerFactory = mock(JupyterSessionManagerFactory);
-        when(jupyterSessionManagerFactory.create(anything())).thenResolve(instance(jupyterSessionManager));
-        interpreterService = mock<IInterpreterService>();
-        localKernelFinder = mock(LocalKernelFinder);
-        when(localKernelFinder.kernels).thenReturn([]);
-        const extensionChecker = mock(PythonExtensionChecker);
-        when(extensionChecker.isPythonExtensionInstalled).thenReturn(true);
-        const notebookProvider = mock(NotebookProvider);
-        when(notebookProvider.connect(anything())).thenResolve(connInfo);
-        fs = mock(FileSystem);
+        jupyterSessionManager = mock<JupyterLabHelper>();
+        const onDidDispose = new EventEmitter<void>();
+        disposables.push(onDidDispose);
+        when(jupyterSessionManager.onDidDispose).thenReturn(onDidDispose.event);
+        when(jupyterSessionManager.dispose()).thenCall(() => {
+            onDidDispose.fire();
+        });
+        sinon.stub(JupyterLabHelper, 'create').callsFake(() => resolvableInstance(jupyterSessionManager));
         when(fs.delete(anything())).thenResolve();
+        when(fs.createDirectory(uriEquals(globalStorageUri))).thenResolve();
         when(fs.exists(anything())).thenResolve(true);
-        const serverUriStorage = mock(JupyterServerUriStorage);
-        const serverEntry = {
-            uri: connInfo.baseUrl,
-            time: Date.now(),
-            serverId: connInfo.baseUrl,
-            isValidated: true
-        };
-        when(serverUriStorage.getUri()).thenResolve(serverEntry);
-        when(serverUriStorage.getRemoteUri()).thenResolve(serverEntry);
-        const connectionType = mock<IServerConnectionType>();
-        when(connectionType.isLocalLaunch).thenReturn(false);
-        const onDidChangeEvent = new EventEmitter<void>();
-        disposables.push(onDidChangeEvent);
-        when(connectionType.onDidChange).thenReturn(onDidChangeEvent.event);
+        when(fs.readFile(uriEquals(Uri.joinPath(globalStorageUri, RemoteKernelSpecCacheFileName)))).thenReject(
+            new Error('File does not exist')
+        );
+        when(
+            fs.writeFile(uriEquals(Uri.joinPath(globalStorageUri, RemoteKernelSpecCacheFileName)), anything())
+        ).thenCall(async (_, data: string) => {
+            when(fs.readFile(uriEquals(Uri.joinPath(globalStorageUri, RemoteKernelSpecCacheFileName)))).thenResolve(
+                data
+            );
+        });
         cachedRemoteKernelValidator = mock<IJupyterRemoteCachedKernelValidator>();
         when(cachedRemoteKernelValidator.isValid(anything())).thenResolve(true);
         const env = mock<IApplicationEnvironment>();
         when(env.extensionVersion).thenReturn('');
         const kernelProvider = mock<IKernelProvider>();
-        const extensions = mock<IExtensions>();
-        kernelFinder = new KernelFinder([]);
+        kernelFinder = new KernelFinder(disposables);
         kernelsChanged = createEventHandler(kernelFinder, 'onDidChangeKernels');
         disposables.push(kernelsChanged);
-        kernelRankHelper = new KernelRankingHelper(preferredRemoteKernelIdProvider);
-
+        jupyterConnection = mock<JupyterConnection>();
+        when(jupyterConnection.createConnectionInfo(anything())).thenResolve(connInfo);
         remoteKernelFinder = new RemoteKernelFinder(
-            instance(jupyterSessionManagerFactory),
-            instance(interpreterService),
-            instance(extensionChecker),
-            instance(notebookProvider),
-            instance(serverUriStorage),
-            instance(connectionType),
-            instance(memento),
+            'currentremote',
+            'Local Kernels',
             instance(env),
             instance(cachedRemoteKernelValidator),
             kernelFinder,
-            [],
             instance(kernelProvider),
-            instance(extensions),
-            false
+            serverEntry.provider,
+            instance(jupyterConnection),
+            instance(fs),
+            instance(context)
         );
-        remoteKernelFinder.activate().then(noop, noop);
     });
     teardown(() => {
-        disposables.forEach((d) => d.dispose());
+        sinon.restore();
+        disposables = dispose(disposables);
     });
     test('Kernels found', async () => {
+        remoteKernelFinder.activate().then(noop, noop);
+
         when(jupyterSessionManager.getRunningKernels()).thenResolve([]);
         when(jupyterSessionManager.getRunningSessions()).thenResolve([]);
         when(jupyterSessionManager.getKernelSpecs()).thenResolve([
@@ -224,6 +201,8 @@ suite(`Remote Kernel Finder`, () => {
         );
     });
     test('Live sessions', async () => {
+        remoteKernelFinder.activate().then(noop, noop);
+
         when(jupyterSessionManager.getRunningKernels()).thenResolve(python3Kernels);
         when(jupyterSessionManager.getRunningSessions()).thenResolve(python3Sessions);
         when(jupyterSessionManager.getKernelSpecs()).thenResolve([
@@ -236,76 +215,8 @@ suite(`Remote Kernel Finder`, () => {
         const liveKernels = kernels.filter((k) => k.kind === 'connectToLiveRemoteKernel');
         assert.equal(liveKernels.length, 3, 'Live kernels not found');
     });
-    test('Can match based on notebook metadata', async () => {
-        when(jupyterSessionManager.getRunningKernels()).thenResolve(python3Kernels);
-        when(jupyterSessionManager.getRunningSessions()).thenResolve(python3Sessions);
-        when(jupyterSessionManager.getKernelSpecs()).thenResolve([
-            python3spec,
-            python2spec,
-            juliaSpec,
-            interpreterSpec
-        ]);
-        await kernelsChanged.assertFiredAtLeast(1, 100).catch(noop);
-
-        // Try python
-        let kernel = await kernelRankHelper.rankKernels(undefined, kernelFinder.kernels, {
-            language_info: { name: PYTHON_LANGUAGE },
-            orig_nbformat: 4
-        });
-        assert.ok(kernel, 'No python kernel found matching notebook metadata');
-
-        // Julia
-        kernel = await kernelRankHelper.rankKernels(undefined, kernelFinder.kernels, {
-            language_info: { name: 'julia' },
-            orig_nbformat: 4
-        });
-        assert.ok(kernel, 'No julia kernel found matching notebook metadata');
-
-        // Python 2
-        kernel = await kernelRankHelper.rankKernels(undefined, kernelFinder.kernels, {
-            kernelspec: {
-                display_name: 'Python 2 on Disk',
-                name: 'python2'
-            },
-            language_info: { name: PYTHON_LANGUAGE },
-            orig_nbformat: 4
-        });
-        assert.ok(kernel, 'No python2 kernel found matching notebook metadata');
-    });
-    test('Can match based on session id', async () => {
-        when(jupyterSessionManager.getRunningKernels()).thenResolve(python3Kernels);
-        when(jupyterSessionManager.getRunningSessions()).thenResolve(python3Sessions);
-        when(jupyterSessionManager.getKernelSpecs()).thenResolve([
-            python3spec,
-            python2spec,
-            juliaSpec,
-            interpreterSpec
-        ]);
-        let activeKernelIdList: unknown = [];
-        when(memento.update(anything(), anything())).thenCall((key, value) => {
-            if (key === ActiveKernelIdList) {
-                activeKernelIdList = value as any;
-            }
-            return Promise.resolve();
-        });
-        when(memento.get(ActiveKernelIdList, anything())).thenCall(() => activeKernelIdList);
-        const uri = Uri.file('/usr/foobar/foo.ipynb');
-        await preferredRemoteKernelIdProvider.storePreferredRemoteKernelId(uri, '2');
-        await kernelsChanged.assertFiredAtLeast(1, 100).catch(noop);
-
-        const kernel = takeTopRankKernel(await kernelRankHelper.rankKernels(uri, kernelFinder.kernels));
-        assert.ok(kernel, 'Kernel not found for uri');
-        assert.equal(kernel?.kind, 'connectToLiveRemoteKernel', 'Live kernel not found');
-        assert.equal(
-            (kernel as LiveRemoteKernelConnectionMetadata).kernelModel.name,
-            python3Kernels[1].name,
-            'Wrong live kernel returned'
-        );
-
-        verify(memento.update(ActiveKernelIdList, anything())).once();
-    });
-    test('Do not return cached remote kernelspecs or live kernels', async () => {
-        const liveRemoteKernel: LiveRemoteKernelConnectionMetadata = {
+    test('Do not return cached remote kernelspecs or live kernels (if the server is no longer valid)', async () => {
+        const liveRemoteKernel = LiveRemoteKernelConnectionMetadata.create({
             baseUrl: 'baseUrl1',
             id: '1',
             kernelModel: {
@@ -323,41 +234,43 @@ suite(`Remote Kernel Finder`, () => {
                 name: '',
                 numberOfConnections: 0
             },
-            kind: 'connectToLiveRemoteKernel',
-            serverId: 'serverId1'
-        };
-        const cachedKernels: KernelConnectionMetadata[] = [
-            {
+            serverProviderHandle: { handle: '1', id: '1', extensionId: '' }
+        });
+        const cachedKernels = [
+            RemoteKernelSpecConnectionMetadata.create({
                 baseUrl: 'baseUrl1',
-                id: '1',
+                id: '2',
                 kernelSpec: {
                     argv: [],
                     display_name: '',
                     name: '',
                     executable: ''
                 },
-                kind: 'startUsingRemoteKernelSpec',
-                serverId: 'serverId1'
-            },
-            liveRemoteKernel
-        ];
+                serverProviderHandle: { handle: '1', id: '1', extensionId: '' }
+            }).toJSON(),
+            liveRemoteKernel.toJSON()
+        ] as KernelConnectionMetadata[];
         when(cachedRemoteKernelValidator.isValid(anything())).thenResolve(false);
-        when(
-            memento.get<{ kernels: KernelConnectionMetadata[]; extensionVersion: string }>(
-                RemoteKernelSpecsCacheKey,
-                anything()
-            )
-        ).thenReturn({ kernels: cachedKernels, extensionVersion: '' });
+
+        const cacheKey = generateIdFromRemoteProvider(serverEntry.provider);
+        when(fs.readFile(uriEquals(Uri.joinPath(globalStorageUri, RemoteKernelSpecCacheFileName)))).thenResolve(
+            JSON.stringify(<CacheDataFormat>{ extensionVersion: '', data: { [cacheKey]: cachedKernels } })
+        );
         when(jupyterSessionManager.getRunningKernels()).thenResolve([]);
         when(jupyterSessionManager.getRunningSessions()).thenResolve([]);
         when(jupyterSessionManager.getKernelSpecs()).thenResolve([]);
+
+        remoteKernelFinder.activate().then(noop, noop);
+        await sleep(100);
         await remoteKernelFinder.loadCache();
+
         await kernelsChanged.assertFiredAtLeast(1, 100).catch(noop);
 
+        verify(cachedRemoteKernelValidator.isValid(anything())).atLeast(1);
         assert.lengthOf(kernelFinder.kernels, 0);
     });
     test('Return cached remote live kernel if used', async () => {
-        const liveRemoteKernel: LiveRemoteKernelConnectionMetadata = {
+        const liveRemoteKernel = LiveRemoteKernelConnectionMetadata.create({
             baseUrl: 'baseUrl1',
             id: '1',
             kernelModel: {
@@ -375,38 +288,44 @@ suite(`Remote Kernel Finder`, () => {
                 name: '',
                 numberOfConnections: 0
             },
-            kind: 'connectToLiveRemoteKernel',
-            serverId: 'serverId1'
-        };
-        const cachedKernels: KernelConnectionMetadata[] = [
-            {
+            serverProviderHandle: { handle: '1', id: '1', extensionId: '' }
+        });
+        const cachedKernels = [
+            RemoteKernelSpecConnectionMetadata.create({
                 baseUrl: 'baseUrl1',
-                id: '1',
+                id: '2',
                 kernelSpec: {
                     argv: [],
                     display_name: '',
                     name: '',
                     executable: ''
                 },
-                kind: 'startUsingRemoteKernelSpec',
-                serverId: 'serverId1'
-            },
-            liveRemoteKernel
+                serverProviderHandle: { handle: '1', id: '1', extensionId: '' }
+            }).toJSON(),
+            liveRemoteKernel.toJSON()
         ];
-        when(cachedRemoteKernelValidator.isValid(anything())).thenResolve(false);
-        when(cachedRemoteKernelValidator.isValid(liveRemoteKernel)).thenResolve(true);
-        when(
-            memento.get<{ kernels: KernelConnectionMetadata[]; extensionVersion: string }>(
-                RemoteKernelSpecsCacheKey,
-                anything()
-            )
-        ).thenReturn({ kernels: cachedKernels, extensionVersion: '' });
+        when(cachedRemoteKernelValidator.isValid(anything())).thenCall(async (k) => liveRemoteKernel.id === k.id);
+        const cacheKey = generateIdFromRemoteProvider(serverEntry.provider);
+        when(fs.readFile(uriEquals(Uri.joinPath(globalStorageUri, RemoteKernelSpecCacheFileName)))).thenResolve(
+            JSON.stringify(<CacheDataFormat>{ extensionVersion: '', data: { [cacheKey]: cachedKernels } })
+        );
         when(jupyterSessionManager.getRunningKernels()).thenResolve([]);
         when(jupyterSessionManager.getRunningSessions()).thenResolve([]);
         when(jupyterSessionManager.getKernelSpecs()).thenResolve([]);
+
+        remoteKernelFinder.activate().then(noop, noop);
         await remoteKernelFinder.loadCache();
 
         assert.lengthOf(kernelFinder.kernels, 1);
-        assert.deepEqual(kernelFinder.kernels, [liveRemoteKernel]);
+        delete (liveRemoteKernel.kernelModel as Partial<typeof liveRemoteKernel.kernelModel>).lastActivityTime;
+        assert.deepEqual(
+            kernelFinder.kernels.map((k) => {
+                if (k.kind === 'connectToLiveRemoteKernel') {
+                    delete (k.kernelModel as Partial<typeof k.kernelModel>).lastActivityTime;
+                }
+                return k;
+            }),
+            [liveRemoteKernel]
+        );
     });
 });

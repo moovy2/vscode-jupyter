@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import { IExtensionSyncActivationService } from '../platform/activation/types';
 import { IPythonExtensionChecker } from '../platform/api/types';
 import { Identifiers, isPreReleaseVersion } from '../platform/common/constants';
@@ -12,21 +11,30 @@ import { IRawNotebookSupportedService } from './raw/types';
 import { KernelCrashMonitor } from './kernelCrashMonitor';
 import { registerTypes as registerJupyterTypes } from './jupyter/serviceRegistry.web';
 import { injectable } from 'inversify';
-import { IKernelFinder, IKernelProvider, IStartupCodeProvider, IThirdPartyKernelProvider } from './types';
+import {
+    IKernelDependencyService,
+    IKernelFinder,
+    IKernelProvider,
+    IStartupCodeProviders,
+    IThirdPartyKernelProvider
+} from './types';
 import { KernelProvider, ThirdPartyKernelProvider } from './kernelProvider.web';
 import { KernelFinder } from './kernelFinder';
-import { PreferredRemoteKernelIdProvider } from './jupyter/preferredRemoteKernelIdProvider';
-import { IJupyterVariables, IKernelVariableRequester } from './variables/types';
-import { KernelVariables } from './variables/kernelVariables';
+import { PreferredRemoteKernelIdProvider } from './jupyter/connection/preferredRemoteKernelIdProvider';
+import { IJupyterVariables } from './variables/types';
 import { JupyterVariables } from './variables/jupyterVariables';
-import { PythonVariablesRequester } from './variables/pythonVariableRequester';
 import { CellOutputDisplayIdTracker } from './execution/cellDisplayIdTracker';
 import { KernelAutoReconnectMonitor } from './kernelAutoReConnectMonitor';
-import { DebugStartupCodeProvider } from './debuggerStartupCodeProvider';
 import { TrustedKernelPaths } from './raw/finder/trustedKernelPaths.web';
 import { ITrustedKernelPaths } from './raw/finder/types';
 import { KernelStatusProvider } from './kernelStatusProvider';
-import { KernelCompletionsPreWarmer } from './execution/kernelCompletionPreWarmer';
+import { KernelRefreshIndicator } from './kernelRefreshIndicator.web';
+import { RemoteJupyterServerMruUpdate } from './jupyter/connection/remoteJupyterServerMruUpdate';
+import { KernelDependencyService } from './kernelDependencyService.web';
+import { KernelStartupCodeProviders } from './kernelStartupCodeProviders.web';
+import { LastCellExecutionTracker } from './execution/lastCellExecutionTracker';
+import { ClearJupyterServersCommand } from './jupyter/clearJupyterServersCommand';
+import { KernelChatStartupCodeProvider } from './chat/kernelStartupCodeProvider';
 
 @injectable()
 class RawNotebookSupportedService implements IRawNotebookSupportedService {
@@ -38,7 +46,7 @@ export function registerTypes(serviceManager: IServiceManager, isDevMode: boolea
         IRawNotebookSupportedService,
         RawNotebookSupportedService
     );
-    setSharedProperty('isInsiderExtension', isPreReleaseVersion());
+    setSharedProperty('isInsiderExtension', isPreReleaseVersion() ? 'true' : 'false');
 
     const isPythonExtensionInstalled = serviceManager.get<IPythonExtensionChecker>(IPythonExtensionChecker);
     setSharedProperty(
@@ -47,16 +55,14 @@ export function registerTypes(serviceManager: IServiceManager, isDevMode: boolea
     );
     const rawService = serviceManager.get<IRawNotebookSupportedService>(IRawNotebookSupportedService);
     setSharedProperty('rawKernelSupported', rawService.isSupported ? 'true' : 'false');
-
-    serviceManager.addSingleton<IKernelVariableRequester>(
-        IKernelVariableRequester,
-        PythonVariablesRequester,
-        Identifiers.PYTHON_VARIABLES_REQUESTER
-    );
+    serviceManager.addSingleton<IStartupCodeProviders>(IStartupCodeProviders, KernelStartupCodeProviders);
     serviceManager.addSingleton<IJupyterVariables>(IJupyterVariables, JupyterVariables, Identifiers.ALL_VARIABLES);
-    serviceManager.addSingleton<IJupyterVariables>(IJupyterVariables, KernelVariables, Identifiers.KERNEL_VARIABLES);
 
     serviceManager.addSingleton<IExtensionSyncActivationService>(IExtensionSyncActivationService, KernelCrashMonitor);
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
+        KernelRefreshIndicator
+    );
     serviceManager.addSingleton<IExtensionSyncActivationService>(IExtensionSyncActivationService, KernelStatusProvider);
     serviceManager.addSingleton<IExtensionSyncActivationService>(
         IExtensionSyncActivationService,
@@ -64,8 +70,9 @@ export function registerTypes(serviceManager: IServiceManager, isDevMode: boolea
     );
     serviceManager.addSingleton<IExtensionSyncActivationService>(
         IExtensionSyncActivationService,
-        KernelCompletionsPreWarmer
+        RemoteJupyterServerMruUpdate
     );
+
     serviceManager.addSingleton<IKernelProvider>(IKernelProvider, KernelProvider);
     serviceManager.addSingleton<ITrustedKernelPaths>(ITrustedKernelPaths, TrustedKernelPaths);
     serviceManager.addSingleton<IThirdPartyKernelProvider>(IThirdPartyKernelProvider, ThirdPartyKernelProvider);
@@ -74,6 +81,14 @@ export function registerTypes(serviceManager: IServiceManager, isDevMode: boolea
         PreferredRemoteKernelIdProvider
     );
     serviceManager.addSingleton<IKernelFinder>(IKernelFinder, KernelFinder);
+    serviceManager.addSingleton<IKernelDependencyService>(IKernelDependencyService, KernelDependencyService);
+
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
+        ClearJupyterServersCommand
+    );
+    serviceManager.addSingleton<LastCellExecutionTracker>(LastCellExecutionTracker, LastCellExecutionTracker);
+    serviceManager.addBinding(LastCellExecutionTracker, IExtensionSyncActivationService);
 
     // Subdirectories
     registerJupyterTypes(serviceManager, isDevMode);
@@ -82,5 +97,9 @@ export function registerTypes(serviceManager: IServiceManager, isDevMode: boolea
         IExtensionSyncActivationService,
         CellOutputDisplayIdTracker
     );
-    serviceManager.addSingleton<IStartupCodeProvider>(IStartupCodeProvider, DebugStartupCodeProvider);
+
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
+        KernelChatStartupCodeProvider
+    );
 }

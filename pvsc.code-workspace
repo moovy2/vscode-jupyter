@@ -21,6 +21,9 @@
         {
             "name": "vscode-jupyter-powertoys",
             "path": "../vscode-jupyter-powertoys"
+        },
+        {
+            "path": "src/test/vscode-notebook-perf"
         }
     ],
     "settings": {
@@ -31,7 +34,8 @@
             "**/.vscode test/stable/**": true,
             "**/.vscode-test/insider/**": true,
             "**/.vscode-test/stable/**": true,
-            "**/out/**": true
+            "**/out/**": true,
+            "**/dist/**": true
         }
     },
     "launch": {
@@ -48,12 +52,12 @@
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-python}",
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-jupyter}"
                 ],
-                "stopOnEntry": false,
                 "sourceMaps": true,
                 "outFiles": [
                     "${workspaceFolder:vscode-python}/out/**/*.js",
                     "!${workspaceFolder:vscode-python}/**/node_modules**/*",
                     "${workspaceFolder:vscode-jupyter}/out/**/*.js",
+                    "${workspaceFolder:vscode-jupyter}/dist/**/*.js",
                     "!${workspaceFolder:vscode-jupyter}/**/node_modules**/*"
                 ],
                 "skipFiles": ["<node_internals>/**"]
@@ -74,12 +78,12 @@
                     "VSC_JUPYTER_SMOKE_TEST": "1",
                     "VSC_JUPYTER_CI_TEST_GREP": "Smoke Test"
                 },
-                "stopOnEntry": false,
                 "sourceMaps": true,
                 "outFiles": [
                     "${workspaceFolder:vscode-python}/out/**/*.js",
                     "!${workspaceFolder:vscode-python}/**/node_modules**/*",
                     "${workspaceFolder:vscode-jupyter}/out/**/*.js",
+                    "${workspaceFolder:vscode-jupyter}/dist/**/*.js",
                     "!${workspaceFolder:vscode-jupyter}/**/node_modules**/*"
                 ],
                 "skipFiles": ["<node_internals>/**"]
@@ -94,12 +98,12 @@
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-jupyter}",
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-notebook-renderers}"
                 ],
-                "stopOnEntry": false,
                 "sourceMaps": true,
                 "outFiles": [
                     "${workspaceFolder:vscode-python}/out/**/*.js",
                     "!${workspaceFolder:vscode-python}/**/node_modules**/*",
                     "${workspaceFolder:vscode-jupyter}/out/**/*.js",
+                    "${workspaceFolder:vscode-jupyter}/dist/**/*.js",
                     "!${workspaceFolder:vscode-jupyter}/**/node_modules**/*",
                     "${workspaceFolder:vscode-notebook-renderers}/out/**/*.js",
                     "!${workspaceFolder:vscode-notebook-renderers}/**/node_modules**/*"
@@ -115,10 +119,10 @@
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-jupyter}",
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-jupyter-powertoys}"
                 ],
-                "stopOnEntry": false,
                 "sourceMaps": true,
                 "outFiles": [
                     "${workspaceFolder:vscode-jupyter}/out/**/*.js",
+                    "${workspaceFolder:vscode-jupyter}/dist/**/*.js",
                     "!${workspaceFolder:vscode-jupyter}/**/node_modules**/*",
                     "${workspaceFolder:vscode-jupyter-powertoys}/out/**/*.js",
                     "!${workspaceFolder:vscode-jupyter-powertoys}/**/node_modules**/*"
@@ -134,10 +138,10 @@
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-jupyter}",
                     "--extensionDevelopmentPath=${workspaceFolder:vscode-notebook-renderers}"
                 ],
-                "stopOnEntry": false,
                 "sourceMaps": true,
                 "outFiles": [
                     "${workspaceFolder:vscode-jupyter}/out/**/*.js",
+                    "${workspaceFolder:vscode-jupyter}/dist/**/*.js",
                     "!${workspaceFolder:vscode-jupyter}/**/node_modules**/*",
                     "${workspaceFolder:vscode-notebook-renderers}/out/**/*.js",
                     "!${workspaceFolder:vscode-notebook-renderers}/**/node_modules**/*"
@@ -160,18 +164,16 @@
                     "VSC_JUPYTER_CI_TEST_INVERT_GREP": "", // Initialize this to invert the grep (exclude tests with value defined in grep).
                     "CI_PYTHON_PATH": "<PythonPath>", // Update with path to real python interpereter used for testing.
                     "VSC_JUPYTER_CI_RUN_NON_PYTHON_NB_TEST": "", // Initialize this to run tests again Julia & other kernels.
-                    "VSC_JUPYTER_WEBVIEW_TEST_MIDDLEWARE": "true", // Initialize to create the webview test middleware
-                    "VSC_JUPYTER_LOAD_EXPERIMENTS_FROM_FILE": "true",
                     "TEST_FILES_SUFFIX": "*.vscode.test,*.vscode.common.test",
                     "VSC_JUPYTER_REMOTE_NATIVE_TEST": "false", // Change to `true` to run the Native Notebook tests with remote jupyter connections.
                     "VSC_JUPYTER_NON_RAW_NATIVE_TEST": "false", // Change to `true` to run the Native Notebook tests with non-raw kernels (i.e. local jupyter server).
                     "XVSC_JUPYTER_INSTRUMENT_CODE_FOR_COVERAGE": "1",
                     "XVSC_JUPYTER_INSTRUMENT_CODE_FOR_COVERAGE_HTML": "1" //Enable to get full coverage repor (in coverage folder).
                 },
-                "stopOnEntry": false,
                 "sourceMaps": true,
                 "outFiles": [
                     "${workspaceFolder:vscode-jupyter}/out/**/*.js",
+                    "${workspaceFolder:vscode-jupyter}/dist/**/*.js",
                     "!${workspaceFolder:vscode-jupyter}/**/node_modules**/*"
                 ],
                 "skipFiles": ["<node_internals>/**"]

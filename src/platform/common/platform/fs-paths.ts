@@ -5,7 +5,15 @@ import { Uri, WorkspaceFolder } from 'vscode';
 import * as path from '../../vscode-path/path';
 import * as uriPath from '../../vscode-path/resources';
 import { getOSType, OSType } from '../utils/platform';
+import { isWeb } from '../utils/misc';
 
+function getHomeDir() {
+    if (isWeb()) {
+        return undefined;
+    }
+    // eslint-disable-next-line local-rules/node-imports
+    return Uri.file(require('os').homedir()); // This is the only thing requiring a node version
+}
 export function getFilePath(file: Uri | undefined) {
     const isWindows = getOSType() === OSType.Windows;
     if (file) {
@@ -23,14 +31,36 @@ export function getFilePath(file: Uri | undefined) {
 }
 
 export function getDisplayPath(
-    filename: Uri | undefined,
+    filename: Uri | string | undefined,
     workspaceFolders: readonly WorkspaceFolder[] | WorkspaceFolder[] = [],
-    homePath: Uri | undefined = undefined
+    homePathUri?: Uri
 ) {
-    const relativeToHome = getDisplayPathImpl(filename, undefined, homePath);
-    const relativeToWorkspaceFolders = workspaceFolders.map((folder) =>
-        getDisplayPathImpl(filename, folder.uri, homePath)
+    homePathUri = homePathUri || getHomeDir();
+    let fileUri: Uri | undefined = undefined;
+    if (typeof filename && typeof filename === 'string') {
+        fileUri = Uri.file(filename);
+    }
+    if (typeof filename && typeof filename !== 'string') {
+        fileUri = filename;
+    }
+    const relativeToHome = getDisplayPathImpl(fileUri, undefined, homePathUri);
+    const workspaceFolderThatOwnsTheFile = workspaceFolders.find(
+        (w) => fileUri && uriPath.isEqualOrParent(fileUri, w.uri, true)
     );
+    // If there is more than one workspace folder, then we need to display the workspace folder name.
+    // This is because we can have two files with the same name in different workspace folders.
+    // E.g. .venv/bin/python can exist in multiple workspace folders.
+    if (workspaceFolders.length > 1 && workspaceFolderThatOwnsTheFile) {
+        return `${workspaceFolderThatOwnsTheFile.name}${path.sep}${getDisplayPathImpl(
+            fileUri,
+            workspaceFolderThatOwnsTheFile.uri,
+            homePathUri
+        )}`;
+    }
+
+    const relativeToWorkspaceFolders = workspaceFolderThatOwnsTheFile
+        ? [getDisplayPathImpl(fileUri, workspaceFolderThatOwnsTheFile.uri, homePathUri)]
+        : [];
     // Pick the shortest path for display purposes.
     // As those are most likely relative to some workspace folder.
     let bestDisplayPath = relativeToHome;

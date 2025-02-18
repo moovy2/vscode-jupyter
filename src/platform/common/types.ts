@@ -1,20 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import type * as nbformat from '@jupyterlab/nbformat';
-import { ConfigurationTarget, Disposable, Event, Extension, ExtensionContext, OutputChannel, Uri, Range } from 'vscode';
+import { ConfigurationTarget, Disposable, Event, ExtensionContext, OutputChannel, Uri, Range } from 'vscode';
 import { PythonEnvironment } from '../pythonEnvironments/info';
-import { CommandsWithoutArgs } from '../../commands';
-import { ICommandManager } from './application/types';
-import { Experiments } from './experiments/groups';
+import { CommandIds } from '../../commands';
 import { ISystemVariables } from './variables/types';
 
-export const IsCodeSpace = Symbol('IsCodeSpace');
 export const IsDevMode = Symbol('IsDevMode');
-export const IsWebExtension = Symbol('IsWebExtension');
-export const IsPreRelease = Symbol('IsPreRelease');
 export const IOutputChannel = Symbol('IOutputChannel');
 export interface IOutputChannel extends OutputChannel {}
 export const IsWindows = Symbol('IS_WINDOWS');
@@ -53,52 +45,39 @@ export interface IRandom {
 
 export interface IJupyterSettings {
     readonly experiments: IExperiments;
-    readonly logging: ILoggingSettings;
     readonly allowUnauthorizedRemoteConnection: boolean;
-    readonly allowImportFromNotebook: boolean;
     readonly jupyterInterruptTimeout: number;
     readonly jupyterLaunchTimeout: number;
     readonly jupyterLaunchRetries: number;
     readonly notebookFileRoot: string;
     readonly useDefaultConfigForJupyter: boolean;
-    readonly searchForJupyter: boolean;
-    readonly allowInput: boolean;
-    readonly showCellInputCode: boolean;
-    readonly maxOutputSize: number;
-    readonly enableScrollingForCellOutputs: boolean;
     readonly enablePythonKernelLogging: boolean;
     readonly sendSelectionToInteractiveWindow: boolean;
+    readonly splitRunFileIntoCells: boolean;
     readonly markdownRegularExpression: string;
     readonly codeRegularExpression: string;
-    readonly allowLiveShare: boolean;
     readonly errorBackgroundColor: string;
-    readonly ignoreVscodeTheme: boolean;
     readonly variableExplorerExclude: string;
-    readonly liveShareConnectionTimeout: number;
-    readonly decorateCells: boolean;
+    readonly decorateCells: 'currentCell' | 'allCells' | 'disabled';
     readonly enableCellCodeLens: boolean;
     askForLargeDataFrames: boolean;
     readonly enableAutoMoveToNextCell: boolean;
     readonly askForKernelRestart: boolean;
-    readonly generateSVGPlots: boolean;
     readonly codeLenses: string;
     readonly debugCodeLenses: string;
     readonly debugpyDistPath: string;
     readonly stopOnFirstLineWhileDebugging: boolean;
-    readonly textOutputLimit: number;
     readonly magicCommandsAsComments: boolean;
     readonly pythonExportMethod: 'direct' | 'commentMagics' | 'nbconvert';
     readonly stopOnError: boolean;
-    readonly remoteDebuggerPort: number;
-    readonly colorizeInputBox: boolean;
     readonly addGotoCodeLenses: boolean;
     readonly runStartupCommands: string | string[];
     readonly debugJustMyCode: boolean;
     readonly defaultCellMarker: string;
     readonly verboseLogging: boolean;
     readonly themeMatplotlibPlots: boolean;
-    readonly variableQueries: IVariableQuery[];
     readonly disableJupyterAutoStart: boolean;
+    readonly development: boolean;
     readonly jupyterCommandLineArguments: string[];
     readonly widgetScriptSources: WidgetCDNs[];
     readonly interactiveWindowMode: InteractiveWindowMode;
@@ -106,33 +85,25 @@ export interface IJupyterSettings {
     readonly interactiveWindowViewColumn: InteractiveWindowViewColumn;
     readonly disableZMQSupport: boolean;
     readonly forceIPyKernelDebugger?: boolean;
-    readonly disablePythonDaemon: boolean;
-    readonly variableTooltipFields: IVariableTooltipFields;
     readonly showVariableViewWhenDebugging: boolean;
     readonly newCellOnRunLast: boolean;
-    readonly pythonCompletionTriggerCharacters?: string;
     readonly logKernelOutputSeparately: boolean;
     readonly poetryPath: string;
     readonly excludeUserSitePackages: boolean;
-    readonly enableExtendedKernelCompletions: boolean;
-    readonly kernelPickerType: KernelPickerType;
-}
-
-export interface IVariableTooltipFields {
-    [languageKey: string]: {
-        [typeNameKey: string]: string[]; // List of attributes
-    };
+    readonly enableExtendedPythonKernelCompletions: boolean;
+    readonly formatStackTraces: boolean;
+    /**
+     * Trigger characters for Jupyter completion, per language.
+     * This excludes the trigger characters for python.
+     * TODO: in debt to merge the two settings.
+     */
+    readonly completionTriggerCharacters?: Record<string, string[]>;
+    readonly interactiveReplNotebook: boolean;
 }
 
 export interface IWatchableJupyterSettings extends IJupyterSettings {
     readonly onDidChange: Event<void>;
     createSystemVariables(resource: Resource): ISystemVariables;
-}
-
-export type LoggingLevelSettingType = 'off' | 'error' | 'warn' | 'info' | 'debug' | 'verbose' | 'everything';
-
-export interface ILoggingSettings {
-    readonly level: LoggingLevelSettingType | 'off';
 }
 
 export interface IExperiments {
@@ -150,17 +121,9 @@ export interface IExperiments {
     readonly optOutFrom: string[];
 }
 
-export interface IVariableQuery {
-    language: string;
-    query: string;
-    parseExpr: string;
-}
-
 export type InteractiveWindowMode = 'perFile' | 'single' | 'multiple';
 
 export type InteractiveWindowViewColumn = 'beside' | 'active' | 'secondGroup';
-
-export type KernelPickerType = 'Stable' | 'OnlyOneTypeOfKernel' | 'Insiders';
 
 export type WidgetCDNs = 'unpkg.com' | 'jsdelivr.com';
 
@@ -198,7 +161,6 @@ export type DownloadOptions = {
     extension: 'tmp' | string;
 };
 
-export const IHttpClient = Symbol('IHttpClient');
 export interface IHttpClient {
     downloadFile(uri: string): Promise<Response>;
     /**
@@ -212,40 +174,7 @@ export interface IExtensionContext extends ExtensionContext {}
 
 export const IExtensions = Symbol('IExtensions');
 export interface IExtensions {
-    /**
-     * All extensions currently known to the system.
-     */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    readonly all: readonly Extension<any>[];
-
-    /**
-     * An event which fires when `extensions.all` changes. This can happen when extensions are
-     * installed, uninstalled, enabled or disabled.
-     */
-    readonly onDidChange: Event<void>;
-
-    /**
-     * Get an extension by its full identifier in the form of: `publisher.name`.
-     *
-     * @param extensionId An extension identifier.
-     * @return An extension or `undefined`.
-     */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    getExtension(extensionId: string): Extension<any> | undefined;
-
-    /**
-     * Get an extension its full identifier in the form of: `publisher.name`.
-     *
-     * @param extensionId An extension identifier.
-     * @return An extension or `undefined`.
-     */
-    getExtension<T>(extensionId: string): Extension<T> | undefined;
-    determineExtensionFromCallStack(): Promise<{ extensionId: string; displayName: string }>;
-}
-
-export const IBrowserService = Symbol('IBrowserService');
-export interface IBrowserService {
-    launch(url: string): void;
+    determineExtensionFromCallStack(stack?: string): { extensionId: string; displayName: string };
 }
 
 export const IJupyterExtensionBanner = Symbol('IJupyterExtensionBanner');
@@ -263,13 +192,17 @@ export type DeprecatedFeatureInfo = {
     doNotDisplayPromptStateKey: string;
     message: string;
     moreInfoUrl: string;
-    commands?: CommandsWithoutArgs[];
+    commands?: CommandIds[];
     setting?: DeprecatedSettingAndValue;
 };
 
-export const IFeatureDeprecationManager = Symbol('IFeatureDeprecationManager');
+export interface IFeatureSet {}
 
-export interface IFeatureDeprecationManager extends Disposable {
+export const IFeaturesManager = Symbol('IFeaturesManager');
+
+export interface IFeaturesManager extends Disposable {
+    readonly features: IFeatureSet;
+    readonly onDidChangeFeatures: Event<void>;
     initialize(): void;
     registerDeprecation(deprecatedInfo: DeprecatedFeatureInfo): void;
 }
@@ -300,22 +233,27 @@ export interface IAsyncDisposableRegistry extends IAsyncDisposable {
     push(disposable: IDisposable | IAsyncDisposable): void;
 }
 
+export enum Experiments {
+    DataViewerContribution = 'DataViewerContribution',
+    DoNotWaitForZmqPortsToBeUsed = 'DoNotWaitForZmqPortsToBeUsed',
+    DataViewerDeprecation = 'DataViewerDeprecation'
+}
+
 /**
  * Experiment service leveraging VS Code's experiment framework.
  */
 export const IExperimentService = Symbol('IExperimentService');
 export interface IExperimentService {
     activate(): Promise<void>;
-    inExperiment(experimentName: Experiments): Promise<boolean>;
-    getExperimentValue<T extends boolean | number | string>(experimentName: string): Promise<T | undefined>;
-    logExperiments(): void;
+    inExperiment(experimentName: Experiments): boolean;
+    getExperimentValue<T extends boolean | number | string>(experimentName: Experiments): Promise<T | undefined>;
 }
 
 export type InterpreterUri = Resource | PythonEnvironment;
 
 export const IDataScienceCommandListener = Symbol('IDataScienceCommandListener');
 export interface IDataScienceCommandListener {
-    register(commandManager: ICommandManager): void;
+    register(): void;
 }
 
 export interface IDisplayOptions {
@@ -324,11 +262,6 @@ export interface IDisplayOptions {
 }
 
 // Basic structure for a cell from a notebook
-export interface ICell {
-    uri?: Uri;
-    data: nbformat.ICodeCell | nbformat.IRawCell | nbformat.IMarkdownCell;
-}
-
 // CellRange is used as the basis for creating new ICells.
 // Was only intended to aggregate together ranges to create an ICell
 // However the "range" aspect is useful when working with plain text document
@@ -356,6 +289,11 @@ type ScriptCode = {
      */
     cleanupCode?: string;
 };
+export type ParentOptions = {
+    root: string;
+    propertyChain: (string | number)[];
+    startIndex: number;
+};
 export interface IVariableScriptGenerator {
     generateCodeToGetVariableInfo(options: { isDebugging: boolean; variableName: string }): Promise<ScriptCode>;
     generateCodeToGetVariableProperties(options: {
@@ -364,6 +302,8 @@ export interface IVariableScriptGenerator {
         stringifiedAttributeNameList: string;
     }): Promise<ScriptCode>;
     generateCodeToGetVariableTypes(options: { isDebugging: boolean }): Promise<ScriptCode>;
+    generateCodeToGetAllVariableDescriptions(parentOptions: ParentOptions | undefined): Promise<string>;
+    generateCodeToGetVariableValueSummary(variableName: string): Promise<string>;
 }
 export const IDataFrameScriptGenerator = Symbol('IDataFrameScriptGenerator');
 export interface IDataFrameScriptGenerator {

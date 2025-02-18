@@ -14,13 +14,13 @@ export const EXTENSION_TEST_DIR_FOR_FILES = path.join(
     'src',
     'test',
     'datascience',
-    'tmp'
+    'temp'
 );
 export const JVSC_EXTENSION_ID_FOR_TESTS = 'ms-toolsai.jupyter';
 
 export const SMOKE_TEST_EXTENSIONS_DIR = path.join(
     EXTENSION_ROOT_DIR_FOR_TESTS,
-    'tmp',
+    'temp',
     'ext',
     'smokeTestExtensionsFolder'
 );
@@ -36,5 +36,5 @@ setTestSettings({
     isCondaTest: (process.env.VSC_JUPYTER_CI_IS_CONDA || '').toLowerCase() === 'true',
     isNonRawNativeTest: (process.env.VSC_JUPYTER_NON_RAW_NATIVE_TEST || '').toLowerCase() === 'true',
     isRemoteNativeTest: (process.env.VSC_JUPYTER_REMOTE_NATIVE_TEST || '').toLowerCase() === 'true',
-    isPerfTest: process.env.VSC_JUPYTER_PERF_TEST === '1'
+    isPerfTest: process.env.VSC_JUPYTER_PERF_TEST === '1' || process.env.VSC_JUPYTER_PERF_TEST === 'true'
 });

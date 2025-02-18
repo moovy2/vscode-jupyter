@@ -2,9 +2,7 @@
 // Licensed under the MIT License.
 
 import * as path from '../../platform/vscode-path/path';
-import '../../platform/common/extensions';
-import { traceError } from '../../platform/logging';
-import { PythonEnvInfo } from '../../platform/common/process/internal/scripts/index.node';
+import { logger } from '../../platform/logging';
 import { ProcessService } from '../../platform/common/process/proc.node';
 import { PythonEnvironment } from '../../platform/pythonEnvironments/info';
 import { parsePythonVersion } from '../../platform/pythonEnvironments/info/pythonVersion.node';
@@ -14,6 +12,7 @@ import { getCondaEnvironment, getCondaFile, isCondaAvailable } from './condaServ
 import { getComparisonKey } from '../../platform/vscode-path/resources';
 import { Uri } from 'vscode';
 import { getOSType, OSType } from '../../platform/common/utils/platform';
+import { fileToCommandArgument } from '../../platform/common/helpers';
 
 const executionTimeout = 30_000;
 const SCRIPTS_DIR = path.join(EXTENSION_ROOT_DIR_FOR_TESTS, 'pythonFiles');
@@ -25,6 +24,12 @@ const defaultShells = {
 };
 
 const defaultShell = defaultShells[getOSType()];
+type ReleaseLevel = 'alpha' | 'beta' | 'candidate' | 'final';
+type PythonVersionInfo = [number, number, number, ReleaseLevel, number];
+type PythonEnvInfo = {
+    versionInfo: PythonVersionInfo;
+    exe: string;
+};
 
 const interpreterInfoCache = new Map<string, Promise<PythonEnvironment | undefined>>();
 export async function getInterpreterInfo(pythonPath: Uri | undefined): Promise<PythonEnvironment | undefined> {
@@ -40,15 +45,15 @@ export async function getInterpreterInfo(pythonPath: Uri | undefined): Promise<P
         try {
             const cli = await getPythonCli(pythonPath);
             const processService = new ProcessService();
-            const argv = [...cli, path.join(SCRIPTS_DIR, 'interpreterInfo.py').fileToCommandArgument()];
-            const cmd = argv.reduce((p, c) => (p ? `${p} "${c}"` : `"${c.replace('\\', '/')}"`), '');
+            const argv = [...cli, fileToCommandArgument(path.join(SCRIPTS_DIR, 'interpreterInfo.py'))];
+            const cmd = argv.reduce((p, c) => (p ? `${p} "${c}"` : `"${c.replace('\\', '/')}"`), ''); // CodeQL [SM02383] Replace just the first occurrence of \\ as this could be a UNC path.
             const result = await processService.shellExec(cmd, {
                 timeout: executionTimeout,
                 env: process.env,
                 shell: defaultShell
             });
             if (result.stderr && result.stderr.length) {
-                traceError(`Failed to parse interpreter information for ${argv} stderr: ${result.stderr}`);
+                logger.error(`Failed to parse interpreter information for ${argv} stderr: ${result.stderr}`);
                 return;
             }
             const json: PythonEnvInfo = JSON.parse(result.stdout.trim());
@@ -57,12 +62,10 @@ export async function getInterpreterInfo(pythonPath: Uri | undefined): Promise<P
                 id: json.exe,
                 uri: Uri.file(json.exe),
                 displayName: `Python${rawVersion}`,
-                version: parsePythonVersion(rawVersion),
-                sysVersion: json.sysVersion,
-                sysPrefix: json.sysPrefix
+                version: parsePythonVersion(rawVersion)
             };
         } catch (ex) {
-            traceError('Failed to get Activated env Variables: ', ex);
+            logger.error('Failed to get Activated env Variables: ', ex);
             return undefined;
         }
     })();
@@ -81,7 +84,7 @@ export async function getActivatedEnvVariables(pythonPath: Uri): Promise<NodeJS.
         const processService = new ProcessService();
         const separator = 'e976ee50-99ed-4aba-9b6b-9dcd5634d07d';
         const argv = [...cli, path.join(SCRIPTS_DIR, 'printEnvVariables.py')];
-        const cmd = argv.reduce((p, c) => (p ? `${p} "${c}"` : `"${c.replace('\\', '/')}"`), '');
+        const cmd = argv.reduce((p, c) => (p ? `${p} "${c}"` : `"${c.replace('\\', '/')}"`), ''); // CodeQL [SM02383] Replace just the first occurrence of \\ as this could be a UNC path.
         const result = await processService.shellExec(cmd, {
             timeout: executionTimeout,
             maxBuffer: 1000 * 1000,
@@ -90,7 +93,7 @@ export async function getActivatedEnvVariables(pythonPath: Uri): Promise<NodeJS.
             shell: defaultShell
         });
         if (result.stderr && result.stderr.length) {
-            traceError(`Failed to get env vars for shell ${defaultShell} with ${argv} stderr: ${result.stderr}`);
+            logger.error(`Failed to get env vars for shell ${defaultShell} with ${argv} stderr: ${result.stderr}`);
             return;
         }
         try {
@@ -99,7 +102,7 @@ export async function getActivatedEnvVariables(pythonPath: Uri): Promise<NodeJS.
             const output = result.stdout;
             return JSON.parse(output.substring(output.indexOf(separator) + separator.length).trim());
         } catch (ex) {
-            traceError(`Failed to get env vars for shell ${defaultShell} with ${argv}`, ex);
+            logger.error(`Failed to get env vars for shell ${defaultShell} with ${argv}`, ex);
         }
     })();
     envVariables.set(key, promise);
@@ -125,11 +128,11 @@ async function getPythonCli(pythonPath: Uri | undefined) {
             }
 
             const condaFile = await getCondaFile();
-            return [condaFile.fileToCommandArgument(), ...runArgs, 'python'];
+            return [fileToCommandArgument(condaFile), ...runArgs, 'python'];
         } catch {
             // Noop.
         }
-        traceError('Using Conda Interpreter, but no conda');
+        logger.error('Using Conda Interpreter, but no conda');
     }
-    return pythonPath ? [pythonPath.fsPath.fileToCommandArgument()] : [];
+    return pythonPath ? [fileToCommandArgument(pythonPath.fsPath)] : [];
 }

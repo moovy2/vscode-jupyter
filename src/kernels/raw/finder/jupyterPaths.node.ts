@@ -1,15 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
+import * as crypto from 'crypto';
 import { inject, injectable, named } from 'inversify';
+import * as fs from 'fs-extra';
 import * as path from '../../../platform/vscode-path/path';
 import * as uriPath from '../../../platform/vscode-path/resources';
 import { CancellationToken, Memento, Uri } from 'vscode';
 import { IFileSystem, IPlatformService } from '../../../platform/common/platform/types';
 import { IFileSystemNode } from '../../../platform/common/platform/types.node';
-import { ignoreLogging, traceError, traceWarning } from '../../../platform/logging';
+import { ignoreLogging, logValue, logger } from '../../../platform/logging';
 import {
     IDisposableRegistry,
     IMemento,
@@ -19,13 +19,17 @@ import {
 } from '../../../platform/common/types';
 import { tryGetRealPath } from '../../../platform/common/utils.node';
 import { ICustomEnvironmentVariablesProvider } from '../../../platform/common/variables/types';
-import { traceDecoratorVerbose } from '../../../platform/logging';
+import { debugDecorator } from '../../../platform/logging';
 import { OSType } from '../../../platform/common/utils/platform.node';
-import { ResourceMap, ResourceSet } from '../../../platform/vscode-path/map';
 import { noop } from '../../../platform/common/utils/misc';
 import { PythonEnvironment } from '../../../platform/pythonEnvironments/info';
-import { IPythonExecutionFactory } from '../../../platform/common/process/types.node';
 import { TraceOptions } from '../../../platform/logging/types';
+import { IPythonExecutionFactory } from '../../../platform/interpreter/types.node';
+import { getDisplayPath } from '../../../platform/common/platform/fs-paths';
+import { StopWatch } from '../../../platform/common/utils/stopWatch';
+import { ResourceMap, ResourceSet } from '../../../platform/common/utils/map';
+import { getPythonEnvDisplayName, getSysPrefix } from '../../../platform/interpreter/helpers';
+import { getExtensionTempDir } from '../../../platform/common/temp';
 
 const winJupyterPath = path.join('AppData', 'Roaming', 'jupyter', 'kernels');
 const linuxJupyterPath = path.join('.local', 'share', 'jupyter', 'kernels');
@@ -69,9 +73,10 @@ export class JupyterPaths {
     /**
      * Contains the name of the directory where the Jupyter extension will temporary register Kernels when using non-raw.
      * (this way we don't register kernels in global path).
+     * This path needs to be writable, as we store the kernelspecs here when we spawn kernels using Jupyter Server.
      */
     public async getKernelSpecTempRegistrationFolder() {
-        const dir = uriPath.joinPath(this.context.extensionUri, 'temp', 'jupyter', 'kernels');
+        const dir = uriPath.joinPath(await getExtensionTempDir(this.context), 'jupyter', 'kernels');
         await this.fs.createDirectory(dir);
         return dir;
     }
@@ -79,42 +84,58 @@ export class JupyterPaths {
      * This should return a WRITABLE place that jupyter will look for a kernel as documented
      * here: https://jupyter-client.readthedocs.io/en/stable/kernels.html#kernel-specs
      */
-    @traceDecoratorVerbose('Getting Jupyter KernelSpec Root Path')
     public async getKernelSpecRootPath(): Promise<Uri | undefined> {
-        this.cachedKernelSpecRootPath =
-            this.cachedKernelSpecRootPath ||
-            (async () => {
-                const userHomeDir = this.platformService.homeDir;
-                if (userHomeDir) {
-                    if (this.platformService.isWindows) {
-                        // On windows the path is not correct if we combine those variables.
-                        // It won't point to a path that you can actually read from.
-                        return tryGetRealPath(uriPath.joinPath(userHomeDir, winJupyterPath));
-                    } else if (this.platformService.isMac) {
-                        return uriPath.joinPath(userHomeDir, macJupyterPath);
-                    } else {
-                        return uriPath.joinPath(userHomeDir, linuxJupyterPath);
-                    }
+        const cachedRootPath = this.getCachedRootPath();
+        if (cachedRootPath || this.cachedKernelSpecRootPath) {
+            return cachedRootPath || this.cachedKernelSpecRootPath;
+        }
+        this.cachedKernelSpecRootPath = (async () => {
+            const userHomeDir = this.platformService.homeDir;
+            if (userHomeDir) {
+                if (this.platformService.isWindows) {
+                    // On windows the path is not correct if we combine those variables.
+                    // It won't point to a path that you can actually read from.
+                    return tryGetRealPath(uriPath.joinPath(userHomeDir, winJupyterPath));
+                } else if (this.platformService.isMac) {
+                    return uriPath.joinPath(userHomeDir, macJupyterPath);
+                } else {
+                    return uriPath.joinPath(userHomeDir, linuxJupyterPath);
                 }
-            })();
+            }
+        })();
         this.cachedKernelSpecRootPath
             .then((value) => {
-                return this.updateCachedRootPath(value);
+                logger.trace(`Getting Jupyter KernelSpec Root Path ${value?.toString()}`);
+                this.updateCachedRootPath(value);
             })
-            .ignoreErrors();
-        if (this.getCachedRootPath()) {
-            return this.getCachedRootPath();
-        }
+            .catch(noop);
         return this.cachedKernelSpecRootPath;
     }
     /**
      * Returns the value for `JUPYTER_RUNTIME_DIR`, location where Jupyter stores runtime files.
      * Such as kernel connection files.
+     * This path needs to be writable, as we store the connection files in here.
      */
-    public async getRuntimeDir(): Promise<Uri | undefined> {
+    public async getRuntimeDir(): Promise<Uri> {
+        const runtimeDir = await this.getRuntimeDirImpl();
+        if (runtimeDir) {
+            return runtimeDir;
+        }
+
+        // Run time directory doesn't exist or no permissions.
+        const extensionRuntimeDir = Uri.joinPath(await getExtensionTempDir(this.context), 'jupyter', 'runtime');
+        await fs.ensureDir(extensionRuntimeDir.fsPath);
+        logger.trace(`Using extension runtime directory ${extensionRuntimeDir.fsPath}`);
+        return extensionRuntimeDir;
+    }
+
+    private runtimeDirIsWritable = false;
+    private async getRuntimeDirImpl(): Promise<Uri | undefined> {
         let runtimeDir: Uri | undefined;
         const userHomeDir = this.platformService.homeDir;
-        if (userHomeDir) {
+        if (process.env['JUPYTER_RUNTIME_DIR']) {
+            runtimeDir = Uri.file(path.normalize(process.env['JUPYTER_RUNTIME_DIR']));
+        } else if (userHomeDir) {
             if (this.platformService.isWindows) {
                 // On windows the path is not correct if we combine those variables.
                 // It won't point to a path that you can actually read from.
@@ -122,22 +143,30 @@ export class JupyterPaths {
             } else if (this.platformService.isMac) {
                 runtimeDir = uriPath.joinPath(userHomeDir, macJupyterRuntimePath);
             } else {
-                runtimeDir = process.env['$XDG_RUNTIME_DIR']
-                    ? Uri.file(path.join(process.env['$XDG_RUNTIME_DIR'], 'jupyter', 'runtime'))
+                runtimeDir = process.env['XDG_RUNTIME_DIR']
+                    ? Uri.file(path.join(process.env['XDG_RUNTIME_DIR'], 'jupyter', 'runtime'))
                     : uriPath.joinPath(userHomeDir, '.local', 'share', 'jupyter', 'runtime');
             }
         }
         if (!runtimeDir) {
-            traceError(`Failed to determine Jupyter runtime directory`);
+            logger.error(`Failed to determine Jupyter runtime directory`);
             return;
         }
 
         try {
-            // Make sure the local file exists
+            // Make sure the directory exists and is writable.
             await this.fs.createDirectory(runtimeDir);
+            if (!this.runtimeDirIsWritable) {
+                // Ensure this folder is writable as well, we've found cases where this folder is not writable.
+                const tempFileName = `temp-test-write-access-${crypto.randomBytes(20).toString('hex')}.txt`;
+                const tempFile = uriPath.joinPath(runtimeDir, tempFileName);
+                // If this fails, then thats find, at least we know the folder is not writable, even if it exists.
+                await fs.writeFile(tempFile.fsPath, '');
+                await fs.unlink(tempFile.fsPath).catch(noop);
+            }
             return runtimeDir;
         } catch (ex) {
-            traceError(`Failed to create runtime directory, reverting to temp directory ${runtimeDir}`, ex);
+            logger.error(`Failed to create/or verify write access to runtime directory ${runtimeDir}`, ex);
         }
     }
     /**
@@ -148,19 +177,16 @@ export class JupyterPaths {
     public async getDataDirs(options: { resource: Resource; interpreter?: PythonEnvironment }): Promise<Uri[]> {
         const key = options.interpreter ? options.interpreter.uri.toString() : '';
         if (!this.cachedDataDirs.has(key)) {
-            this.cachedDataDirs.set(key, this.getDataDirsImpl(options));
+            this.cachedDataDirs.set(key, this.getDataDirsImpl(options.resource, options.interpreter));
         }
         return this.cachedDataDirs.get(key)!;
     }
 
-    @traceDecoratorVerbose('getDataDirsImpl', TraceOptions.BeforeCall | TraceOptions.Arguments)
-    private async getDataDirsImpl({
-        resource,
-        interpreter
-    }: {
-        resource: Resource;
-        interpreter?: PythonEnvironment;
-    }): Promise<Uri[]> {
+    @debugDecorator('getDataDirsImpl', TraceOptions.BeforeCall | TraceOptions.Arguments | TraceOptions.ReturnValue)
+    private async getDataDirsImpl(
+        resource: Resource,
+        @logValue<PythonEnvironment>('id') interpreter?: PythonEnvironment
+    ): Promise<Uri[]> {
         // When adding paths keep distinct values and preserve the order.
         const dataDir = new ResourceMap<number>();
 
@@ -175,10 +201,10 @@ export class JupyterPaths {
         // 2. Add the paths based on ENABLE_USER_SITE
         if (interpreter) {
             try {
+                logger.ci(`Getting Jupyter Data Dir for ${interpreter.uri.fsPath}`);
                 const factory = await this.pythonExecFactory.createActivatedEnvironment({
                     interpreter,
-                    resource,
-                    allowEnvironmentFetchExceptions: true
+                    resource
                 });
                 const pythonFile = Uri.joinPath(this.context.extensionUri, 'pythonFiles', 'printJupyterDataDir.py');
                 const result = await factory.exec([pythonFile.fsPath], {});
@@ -188,19 +214,24 @@ export class JupyterPaths {
                         if (!dataDir.has(sitePath)) {
                             dataDir.set(sitePath, dataDir.size);
                         }
-                    } else {
-                        traceWarning(`Got a non-existent Jupyer Data Dir ${sitePath}`);
                     }
+                } else {
+                    logger.debug(`Got an empty Jupyter Data Dir from ${interpreter.id}, stderr = ${result.stderr}`);
                 }
             } catch (ex) {
-                traceError(`Failed to get DataDir based on ENABLE_USER_SITE for ${interpreter.displayName}`, ex);
+                logger.error(
+                    `Failed to get DataDir based on ENABLE_USER_SITE for ${getPythonEnvDisplayName(interpreter)}`,
+                    ex
+                );
             }
         }
 
         // 3. Add the paths based on user and env data directories
-        const possibleEnvJupyterPath = interpreter?.sysPrefix
-            ? Uri.joinPath(Uri.file(interpreter.sysPrefix), 'share', 'jupyter')
-            : undefined;
+        let sysPrefix: string | undefined;
+        if (interpreter) {
+            sysPrefix = await getSysPrefix(interpreter);
+        }
+        const possibleEnvJupyterPath = sysPrefix ? Uri.joinPath(Uri.file(sysPrefix), 'share', 'jupyter') : undefined;
 
         const systemDataDirectories = this.getSystemJupyterPaths();
         const envJupyterPath = possibleEnvJupyterPath
@@ -245,16 +276,10 @@ export class JupyterPaths {
         }
         return this.platformService.homeDir ? Uri.joinPath(this.platformService.homeDir, '.jupyter') : undefined;
     }
-    private getSystemJupyterPaths(interpreter?: PythonEnvironment) {
+    private getSystemJupyterPaths() {
         if (this.platformService.isWindows) {
             const programData = process.env['PROGRAMDATA'] ? path.normalize(process.env['PROGRAMDATA']) : undefined;
-            if (programData) {
-                return [Uri.joinPath(Uri.file(programData), 'jupyter')];
-            }
-            if (interpreter) {
-                return [Uri.joinPath(Uri.file(interpreter.sysPrefix), 'share', 'jupyter')];
-            }
-            return [];
+            return programData ? [Uri.joinPath(Uri.file(programData), 'jupyter')] : [];
         } else {
             return [Uri.file('/usr/local/share/jupyter'), Uri.file('/usr/share/jupyter')];
         }
@@ -288,12 +313,27 @@ export class JupyterPaths {
             }
         }
     }
+    private cachedKernelSpecRootPaths?: { promise: Promise<Uri[]>; stopWatch: StopWatch };
     /**
      * This list comes from the docs here:
      * https://jupyter-client.readthedocs.io/en/stable/kernels.html#kernel-specs
      */
-    @traceDecoratorVerbose('Get KernelSpec root path')
     public async getKernelSpecRootPaths(cancelToken: CancellationToken): Promise<Uri[]> {
+        if (this.cachedKernelSpecRootPaths?.promise && this.cachedKernelSpecRootPaths.stopWatch.elapsedTime <= 60_000) {
+            return this.cachedKernelSpecRootPaths.promise;
+        }
+        const stopWatch = new StopWatch();
+        const promise = this.getKernelSpecRootPathsImpl(cancelToken);
+        this.cachedKernelSpecRootPaths = { promise, stopWatch };
+        const disposable = cancelToken.onCancellationRequested(() => {
+            if (this.cachedKernelSpecRootPaths?.promise === promise) {
+                this.cachedKernelSpecRootPaths = undefined;
+            }
+        }, this);
+        promise.finally(() => disposable.dispose()).catch(noop);
+        return promise;
+    }
+    private async getKernelSpecRootPathsImpl(cancelToken: CancellationToken): Promise<Uri[]> {
         // Paths specified in JUPYTER_PATH are supposed to come first in searching
         const paths = new ResourceSet(await this.getJupyterPathKernelPaths(cancelToken));
         if (cancelToken.isCancellationRequested) {
@@ -322,10 +362,14 @@ export class JupyterPaths {
             }
         }
 
+        logger.debug(
+            `Kernel Spec Root Paths, ${Array.from(paths)
+                .map((uri) => getDisplayPath(uri))
+                .join(', ')}`
+        );
         return Array.from(paths);
     }
 
-    @traceDecoratorVerbose('Get Jupyter Kernel Paths')
     private async getJupyterPathKernelPaths(@ignoreLogging() cancelToken?: CancellationToken): Promise<Uri[]> {
         this.cachedJupyterKernelPaths =
             this.cachedJupyterKernelPaths || this.getJupyterPathSubPaths(cancelToken, 'kernels');
@@ -334,13 +378,9 @@ export class JupyterPaths {
                 this.updateCachedPaths(value).then(noop, noop);
             }
         }, noop);
-        if (this.getCachedPaths().length > 0) {
-            return this.getCachedPaths();
-        }
-        return this.cachedJupyterKernelPaths;
+        return this.getCachedPaths().length > 0 ? this.getCachedPaths() : this.cachedJupyterKernelPaths;
     }
 
-    @traceDecoratorVerbose('Get Jupyter Paths')
     private async getJupyterPaths(cancelToken?: CancellationToken): Promise<Uri[]> {
         this.cachedJupyterPaths = this.cachedJupyterPaths || this.getJupyterPathSubPaths(cancelToken);
         return this.cachedJupyterPaths;
@@ -351,11 +391,7 @@ export class JupyterPaths {
      * We need to look at the 'kernels' sub-directory and these paths are supposed to come first in the searching
      * https://jupyter.readthedocs.io/en/latest/projects/jupyter-directories.html#envvar-JUPYTER_PATH
      */
-    @traceDecoratorVerbose('Get Jupyter Sub Paths')
-    private async getJupyterPathSubPaths(
-        @ignoreLogging() cancelToken?: CancellationToken,
-        subDir?: string
-    ): Promise<Uri[]> {
+    private async getJupyterPathSubPaths(cancelToken?: CancellationToken, subDir?: string): Promise<Uri[]> {
         const paths = new ResourceSet();
         const vars = await this.envVarsProvider.getEnvironmentVariables(undefined, 'RunPythonCode');
         if (cancelToken?.isCancellationRequested) {
@@ -379,6 +415,7 @@ export class JupyterPaths {
             });
         }
 
+        logger.debug(`Jupyter Paths ${getDisplayPath(subDir)}: ${Array.from(paths).map((uri) => getDisplayPath(uri))}`);
         return Array.from(paths);
     }
 

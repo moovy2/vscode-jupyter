@@ -1,40 +1,32 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import '../../../platform/common/extensions';
-
 import { inject, injectable } from 'inversify';
-
 import { capturePerfTelemetry } from '../../../telemetry';
 import { IDataViewer, IDataViewerDataProvider, IDataViewerFactory } from './types';
-import debounce = require('lodash/debounce');
-import { ICommandManager } from '../../../platform/common/application/types';
 import { ContextKey } from '../../../platform/common/contextKey';
-import { IAsyncDisposable, IAsyncDisposableRegistry, IDisposableRegistry } from '../../../platform/common/types';
+import { IDisposableRegistry, type IDisposable } from '../../../platform/common/types';
 import { IServiceContainer } from '../../../platform/ioc/types';
 import { noop } from '../../../platform/common/utils/misc';
 import { Commands, EditorContexts, Telemetry } from '../../../platform/common/constants';
+import { debounce } from '../../../platform/common/decorators';
+import { commands } from 'vscode';
 
 @injectable()
-export class DataViewerFactory implements IDataViewerFactory, IAsyncDisposable {
+export class DataViewerFactory implements IDataViewerFactory, IDisposable {
     private knownViewers = new Set<IDataViewer>();
     private viewContext: ContextKey;
 
     constructor(
         @inject(IServiceContainer) private serviceContainer: IServiceContainer,
-        @inject(IAsyncDisposableRegistry) asyncRegistry: IAsyncDisposableRegistry,
-        @inject(IDisposableRegistry) private disposables: IDisposableRegistry,
-        @inject(ICommandManager) private commandManager: ICommandManager
+        @inject(IDisposableRegistry) private disposables: IDisposableRegistry
     ) {
-        asyncRegistry.push(this);
-        this.viewContext = new ContextKey(EditorContexts.IsDataViewerActive, this.commandManager);
-        this.disposables.push(
-            this.commandManager.registerCommand(Commands.RefreshDataViewer, this.refreshDataViewer, this)
-        );
+        disposables.push(this);
+        this.viewContext = new ContextKey(EditorContexts.IsDataViewerActive);
+        this.disposables.push(commands.registerCommand(Commands.RefreshDataViewer, this.refreshDataViewer, this));
     }
 
-    public async dispose() {
+    public dispose() {
         for (const viewer of this.knownViewers) {
             viewer.dispose();
         }
@@ -85,7 +77,8 @@ export class DataViewerFactory implements IDataViewerFactory, IAsyncDisposable {
     // Refresh command is mapped to a keybinding. Refresh
     // is expensive. Ensure we debounce refresh requests
     // in case the user is mashing the refresh shortcut.
-    private refreshDataViewer = debounce(() => {
+    @debounce(1000)
+    private refreshDataViewer() {
         // Find the data viewer which is currently active
         for (const viewer of this.knownViewers) {
             if (viewer.active) {
@@ -93,5 +86,5 @@ export class DataViewerFactory implements IDataViewerFactory, IAsyncDisposable {
                 viewer.refreshData().then(noop, noop);
             }
         }
-    }, 1000);
+    }
 }

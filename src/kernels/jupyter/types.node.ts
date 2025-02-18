@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import { CancellationToken } from 'vscode-jsonrpc';
+import { CancellationToken } from 'vscode';
 import { PythonEnvironment } from '../../platform/pythonEnvironments/info';
 import { JupyterCommands } from '../../platform/common/constants';
 import { ExecutionResult, ObservableExecutionResult, SpawnOptions } from '../../platform/common/process/types.node';

@@ -1,23 +1,26 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import { inject, injectable, named } from 'inversify';
 import * as path from '../../platform/vscode-path/path';
 import * as uriPath from '../../platform/vscode-path/resources';
 
-import { DebugAdapterTracker, Disposable, Event, EventEmitter } from 'vscode';
+import { DebugAdapterTracker, Disposable, Event, EventEmitter, window } from 'vscode';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import { IKernel, IKernelProvider } from '../../kernels/types';
-import { convertDebugProtocolVariableToIJupyterVariable, DataViewableTypes } from '../../kernels/variables/helpers';
-import { parseDataFrame } from '../../kernels/variables/pythonVariableRequester';
+import {
+    convertDebugProtocolVariableToIJupyterVariable,
+    DataViewableTypes,
+    parseDataFrame
+} from '../../kernels/variables/helpers';
 import {
     IConditionalJupyterVariables,
     IJupyterVariable,
     IJupyterVariablesRequest,
-    IJupyterVariablesResponse
+    IJupyterVariablesResponse,
+    IVariableDescription
 } from '../../kernels/variables/types';
-import { IDebugService, IVSCodeNotebook } from '../../platform/common/application/types';
+import { IDebugService } from '../../platform/common/application/types';
 import { Identifiers } from '../../platform/common/constants';
 import {
     IConfigurationService,
@@ -26,7 +29,7 @@ import {
     Resource
 } from '../../platform/common/types';
 import { noop } from '../../platform/common/utils/misc';
-import { traceError, traceVerbose } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { sendTelemetryEvent, Telemetry } from '../../telemetry';
 import { IJupyterDebugService, INotebookDebuggingManager, KernelDebugMode } from './debuggingTypes';
 import { DebugLocationTracker } from './debugLocationTracker';
@@ -55,7 +58,6 @@ export class DebuggerVariables
         @inject(IJupyterDebugService) @named(Identifiers.MULTIPLEXING_DEBUGSERVICE) private debugService: IDebugService,
         @inject(INotebookDebuggingManager) private readonly debuggingManager: INotebookDebuggingManager,
         @inject(IConfigurationService) private configService: IConfigurationService,
-        @inject(IVSCodeNotebook) private readonly vscNotebook: IVSCodeNotebook,
         @inject(IVariableScriptGenerator) private readonly varScriptGenerator: IVariableScriptGenerator,
         @inject(IDataFrameScriptGenerator) private readonly dfScriptGenerator: IDataFrameScriptGenerator,
         @inject(IKernelProvider) private readonly kernelProvider: IKernelProvider
@@ -76,6 +78,10 @@ export class DebuggerVariables
     }
 
     // IJupyterVariables implementation
+    getAllVariableDiscriptions(): Promise<IVariableDescription[]> {
+        throw new Error('Method not implemented.');
+    }
+
     public async getVariables(request: IJupyterVariablesRequest, kernel?: IKernel): Promise<IJupyterVariablesResponse> {
         // Listen to notebook events if we haven't already
         if (kernel) {
@@ -133,6 +139,10 @@ export class DebuggerVariables
             }
             return result;
         }
+    }
+
+    public async getVariableValueSummary(_targetVariable: IJupyterVariable) {
+        return undefined;
     }
 
     public async getDataFrameInfo(
@@ -251,7 +261,7 @@ export class DebuggerVariables
         if (message.type === 'response' && message.command === 'initialize') {
             this.debuggingStarted = true;
         } else if (message.type === 'event' && message.event === 'stopped' && this.activeNotebookIsDebugging()) {
-            this.handleNotebookVariables(message as DebugProtocol.StoppedEvent).ignoreErrors();
+            this.handleNotebookVariables(message as DebugProtocol.StoppedEvent).catch(noop);
         } else if (message.type === 'response' && message.command === 'scopes' && message.body && message.body.scopes) {
             const response = message as DebugProtocol.ScopesResponse;
 
@@ -329,7 +339,7 @@ export class DebuggerVariables
                 context: 'repl',
                 format: { rawString: true }
             };
-            traceVerbose(`Evaluating in debugger : ${this.debugService.activeDebugSession.id}: ${code}`);
+            logger.debug(`Evaluating in debugger : ${this.debugService.activeDebugSession.id}: ${code}`);
             try {
                 if (initializeCode) {
                     await this.debugService.activeDebugSession.customRequest('evaluate', {
@@ -344,7 +354,7 @@ export class DebuggerVariables
                 if (results && results.result !== 'None') {
                     return results;
                 } else {
-                    traceError(`Cannot evaluate ${code}`);
+                    logger.error(`Cannot evaluate ${code}`);
                     return undefined;
                 }
             } finally {
@@ -386,7 +396,7 @@ export class DebuggerVariables
 
     private monkeyPatchDataViewableVariables(variablesResponse: DebugProtocol.VariablesResponse) {
         variablesResponse.body.variables.forEach((v) => {
-            if (v.type && DataViewableTypes.has(v.type)) {
+            if (v.type && DataViewableTypes.has(v.type) && v.evaluateName) {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 (v as any).__vscodeVariableMenuContext = 'viewableInDataViewer';
             }
@@ -425,13 +435,13 @@ export class DebuggerVariables
     }
 
     private activeNotebookIsDebugging(): boolean {
-        const activeNotebook = this.vscNotebook.activeNotebookEditor;
+        const activeNotebook = window.activeNotebookEditor;
         return !!activeNotebook && this.debuggingManager.isDebugging(activeNotebook.notebook);
     }
 
     // This handles all the debug session calls, variable handling, and refresh calls needed for notebook debugging
     private async handleNotebookVariables(stoppedMessage: DebugProtocol.StoppedEvent): Promise<void> {
-        const doc = this.vscNotebook.activeNotebookEditor?.notebook;
+        const doc = window.activeNotebookEditor?.notebook;
         const threadId = stoppedMessage.body.threadId;
 
         if (doc) {

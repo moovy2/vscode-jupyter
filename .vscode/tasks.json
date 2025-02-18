@@ -8,50 +8,42 @@
     },
     "tasks": [
         {
-            "label": "Compile",
-            "type": "npm",
-            "script": "compile",
-            "isBackground": true,
-            "problemMatcher": ["$tsc-watch"],
+            "label": "watch",
+            "dependsOn": [
+                "npm: compile-esbuild-watch",
+				"npm: compile-tsc-watch"
+            ],
+            "presentation": {
+                "reveal": "never",
+            },
             "group": {
                 "kind": "build",
                 "isDefault": true
             }
         },
         {
-            "label": "Compile Web Views",
             "type": "npm",
-            "script": "compile-webviews-watch",
+            "script": "compile-esbuild-watch",
+            "group": "build",
+            "problemMatcher": "$esbuild-watch",
             "isBackground": true,
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": ["$ts-webpack-watch"]
+            "label": "npm: compile-esbuild-watch",
+            "presentation": {
+                "group": "watch",
+                "reveal": "never"
+            }
         },
         {
-            "label": "Compile Web Extension",
             "type": "npm",
-            "script": "compile-web-watch",
+            "script": "compile-tsc-watch",
+            "group": "build",
+            "problemMatcher": "$tsc-watch",
             "isBackground": true,
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": ["$ts-webpack-watch"]
-        },
-        {
-            "label": "compile-web-test",
-            "type": "npm",
-            "script": "compile-web-test",
-            "dependsOrder": "sequence",
-            "dependsOn": ["Compile"],
-            "isBackground": true,
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": ["$ts-webpack-watch"]
+            "label": "npm: compile-tsc-watch",
+            "presentation": {
+                "group": "watch",
+                "reveal": "never"
+            }
         },
         {
             "label": "Run Unit Tests",

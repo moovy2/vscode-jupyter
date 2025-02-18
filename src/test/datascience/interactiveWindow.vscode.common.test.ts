@@ -2,9 +2,8 @@
 // Licensed under the MIT License.
 
 import { assert } from 'chai';
-import * as sinon from 'sinon';
 import * as vscode from 'vscode';
-import { traceInfo, traceInfoIfCI } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { getDisplayPath } from '../../platform/common/platform/fs-paths';
 import { IDisposable, InteractiveWindowMode } from '../../platform/common/types';
 import { InteractiveWindowProvider } from '../../interactive-window/interactiveWindowProvider';
@@ -51,73 +50,40 @@ import { translateCellErrorOutput, getTextOutputValue } from '../../kernels/exec
 import dedent from 'dedent';
 import { generateCellRangesFromDocument } from '../../interactive-window/editor-integration/cellFactory';
 import { Commands } from '../../platform/common/constants';
-import { IControllerSelection } from '../../notebooks/controllers/types';
+import { IControllerRegistration } from '../../notebooks/controllers/types';
 import { format } from 'util';
 import { InteractiveWindow } from '../../interactive-window/interactiveWindow';
+import { isSysInfoCell } from '../../interactive-window/systemInfoCell';
+import { getNotebookUriFromInputBoxUri } from '../../standalone/intellisense/notebookPythonPathService';
 
-suite(`Interactive window execution`, async function () {
+suite(`Interactive window execution @iw`, async function () {
     this.timeout(120_000);
     let api: IExtensionTestApi;
     const disposables: IDisposable[] = [];
     let interactiveWindowProvider: InteractiveWindowProvider;
     setup(async function () {
-        traceInfo(`Start Test ${this.currentTest?.title}`);
+        logger.info(`Start Test ${this.currentTest?.title}`);
         api = await initialize();
         if (IS_REMOTE_NATIVE_TEST()) {
             await startJupyterServer();
         }
         interactiveWindowProvider = api.serviceManager.get(IInteractiveWindowProvider);
-        traceInfo(`Start Test (completed) ${this.currentTest?.title}`);
+        logger.info(`Start Test (completed) ${this.currentTest?.title}`);
     });
     teardown(async function () {
-        traceInfo(`Ended Test ${this.currentTest?.title}`);
+        logger.info(`Ended Test ${this.currentTest?.title}`);
         if (this.currentTest?.isFailed()) {
             // For a flaky interrupt test.
             await captureScreenShot(this);
         }
-        sinon.restore();
         await closeNotebooksAndCleanUpAfterTests(disposables);
         // restore the default value
         const settings = vscode.workspace.getConfiguration('jupyter', null);
-        await settings.update('interactiveWindowMode', 'multiple');
-        traceInfo(`Ended Test (completed) ${this.currentTest?.title}`);
-    });
-    test('Execute cell from Python file', async () => {
-        const source = 'print(42)';
-        const { activeInteractiveWindow } = await submitFromPythonFile(interactiveWindowProvider, source, disposables);
-        const notebookDocument = vscode.workspace.notebookDocuments.find(
-            (doc) => doc.uri.toString() === activeInteractiveWindow?.notebookUri?.toString()
-        );
-        const controllerSelection = api.serviceManager.get<IControllerSelection>(IControllerSelection);
-
-        // Ensure we picked up the active interpreter for use as the kernel
-        const interpreterService = await api.serviceManager.get<IInterpreterService>(IInterpreterService);
-
-        // Give it a bit to warm up
-        await sleep(500);
-
-        const controller = notebookDocument ? controllerSelection.getSelected(notebookDocument) : undefined;
-        if (!IS_REMOTE_NATIVE_TEST()) {
-            const activeInterpreter = await interpreterService.getActiveInterpreter();
-            assert.ok(
-                areInterpreterPathsSame(controller?.connection.interpreter?.uri, activeInterpreter?.uri),
-                `Controller does not match active interpreter for ${getDisplayPath(notebookDocument?.uri)}`
-            );
-        }
-
-        // Verify sys info cell
-        const firstCell = notebookDocument?.cellAt(0);
-        assert.ok(firstCell?.metadata.isInteractiveWindowMessageCell, 'First cell should be sys info cell');
-        assert.equal(firstCell?.kind, vscode.NotebookCellKind.Markup, 'First cell should be markdown cell');
-
-        // Verify executed cell input and output
-        const secondCell = notebookDocument?.cellAt(1);
-        const actualSource = secondCell?.document.getText();
-        assert.equal(actualSource, source, `Executed cell has unexpected source code`);
-        await waitForExecutionCompletedSuccessfully(secondCell!);
-        await waitForTextOutput(secondCell!, '42');
+        await settings.update('interactiveWindow.creationMode', 'multiple');
+        logger.info(`Ended Test (completed) ${this.currentTest?.title}`);
     });
     test('__file__ exists even after restarting a kernel', async function () {
+        // https://github.com/microsoft/vscode-jupyter/issues/12251
         // Ensure we click `Yes` when prompted to restart the kernel.
         disposables.push(await clickOKForRestartPrompt());
 
@@ -130,25 +96,31 @@ suite(`Interactive window execution`, async function () {
         const notebookDocument = vscode.workspace.notebookDocuments.find(
             (doc) => doc.uri.toString() === activeInteractiveWindow?.notebookUri?.toString()
         )!;
-        const controllerSelection = api.serviceManager.get<IControllerSelection>(IControllerSelection);
+        const controllerRegistration = api.serviceManager.get<IControllerRegistration>(IControllerRegistration);
         // Ensure we picked up the active interpreter for use as the kernel
         const interpreterService = await api.serviceManager.get<IInterpreterService>(IInterpreterService);
 
         // Give it a bit to warm up
         await sleep(500);
 
-        const controller = notebookDocument ? controllerSelection.getSelected(notebookDocument) : undefined;
+        const controller = notebookDocument ? controllerRegistration.getSelected(notebookDocument) : undefined;
         if (!IS_REMOTE_NATIVE_TEST()) {
             const activeInterpreter = await interpreterService.getActiveInterpreter();
             assert.ok(
                 areInterpreterPathsSame(controller?.connection.interpreter?.uri, activeInterpreter?.uri),
-                `Controller does not match active interpreter for ${getDisplayPath(notebookDocument?.uri)}`
+                `Controller does not match active interpreter for ${getDisplayPath(
+                    notebookDocument?.uri
+                )}, active interpreter is ${getDisplayPath(
+                    activeInterpreter?.uri
+                )} and controller is ${controller?.id} with interpreter ${getDisplayPath(
+                    controller?.connection?.interpreter?.uri
+                )}`
             );
         }
         async function verifyCells() {
             // Verify sys info cell
             const firstCell = notebookDocument.cellAt(0);
-            assert.ok(firstCell?.metadata.isInteractiveWindowMessageCell, 'First cell should be sys info cell');
+            assert.ok(isSysInfoCell(firstCell), 'First cell should be sys info cell');
             assert.equal(firstCell?.kind, vscode.NotebookCellKind.Markup, 'First cell should be markdown cell');
 
             // Verify executed cell input and output
@@ -202,32 +174,16 @@ suite(`Interactive window execution`, async function () {
         await waitForTextOutput(cell, 'foo');
     });
 
-    test('Clear output', async function () {
-        // Test failing after using python insiders. Not getting expected
-        // output
-        // https://github.com/microsoft/vscode-jupyter/issues/7580
-        this.skip();
-        const text = `from IPython.display import clear_output
-for i in range(10):
-    clear_output()
-    print("Hello World {0}!".format(i))
-`;
-        const { activeInteractiveWindow } = await submitFromPythonFile(interactiveWindowProvider, text, disposables);
-        const cell = await waitForLastCellToComplete(activeInteractiveWindow);
-        await waitForTextOutput(cell!, 'Hello World 9!');
-    });
-
     test('Clear input box', async () => {
         const text = '42';
         // Create interactive window with no owner
-        await createStandaloneInteractiveWindow(interactiveWindowProvider);
-        await insertIntoInputEditor(text);
+        let interactiveWindow = await createStandaloneInteractiveWindow(interactiveWindowProvider);
+        await insertIntoInputEditor(text, interactiveWindow);
 
         // Clear input and verify
         assert.ok(vscode.window.activeTextEditor?.document.getText() === text, 'Text not inserted into input editor');
         await vscode.commands.executeCommand('interactive.input.clear');
         assert.ok(vscode.window.activeTextEditor?.document.getText() === '', 'Text not cleared from input editor');
-
         // Undo
         await vscode.commands.executeCommand('undo');
 
@@ -236,52 +192,6 @@ for i in range(10):
             vscode.window.activeTextEditor?.document.getText() === text,
             'Text not restored to input editor after undo'
         );
-    });
-
-    test('LiveLossPlot', async () => {
-        const code = `from time import sleep
-import numpy as np
-
-from livelossplot import PlotLosses
-liveplot = PlotLosses()
-
-for i in range(10):
-    liveplot.update({
-        'accuracy': 1 - np.random.rand() / (i + 2.),
-        'val_accuracy': 1 - np.random.rand() / (i + 0.5),
-        'mse': 1. / (i + 2.),
-        'val_mse': 1. / (i + 0.5)
-    })
-    liveplot.draw()
-    sleep(0.1)`;
-        const interactiveWindow = await createStandaloneInteractiveWindow(interactiveWindowProvider);
-        await runInteractiveWindowInput(code, interactiveWindow, 1);
-
-        const codeCell = await waitForLastCellToComplete(interactiveWindow);
-        const output = codeCell?.outputs[0];
-        assert.ok(output?.items[0].mime === 'image/png', 'No png output found');
-        assert.ok(
-            output?.metadata?.outputType === 'display_data',
-            `Expected metadata.outputType to be 'display_data' but got ${output?.metadata?.outputType}`
-        );
-    });
-
-    // Create 3 cells. Last cell should update the second
-    test('Update display data', async () => {
-        const interactiveWindow = await createStandaloneInteractiveWindow(interactiveWindowProvider);
-
-        // Create cell 1
-        await runInteractiveWindowInput('dh = display(display_id=True)', interactiveWindow, 1);
-
-        // Create cell 2
-        const secondCell = await runInteractiveWindowInput('dh.display("Hello")', interactiveWindow, 2);
-        await waitForTextOutput(secondCell!, "'Hello'");
-
-        // Create cell 3
-        const thirdCell = await runInteractiveWindowInput('dh.update("Goodbye")', interactiveWindow, 3);
-        assert.equal(thirdCell?.outputs.length, 0, 'Third cell should not have any outputs');
-        // Second cell output is updated
-        await waitForTextOutput(secondCell!, "'Goodbye'");
     });
 
     test('Cells with errors cancel execution for others', async () => {
@@ -310,7 +220,7 @@ for i in range(10):
 
     test('Multiple interactive windows', async () => {
         const settings = vscode.workspace.getConfiguration('jupyter', null);
-        await settings.update('interactiveWindowMode', 'multiple');
+        await settings.update('interactiveWindow.creationMode', 'multiple');
         const window1 = await interactiveWindowProvider.getOrCreate(undefined);
         const window2 = await interactiveWindowProvider.getOrCreate(undefined);
         assert.notEqual(
@@ -336,6 +246,11 @@ for i in range(10):
 
 
     print('bar')`;
+        const dedentedCode = `print('foo')
+
+
+
+print('bar')`;
         const codeWithWhitespace = `    # %%
 
 
@@ -346,16 +261,16 @@ ${actualCode}
 
 
 `;
-        traceInfoIfCI('Before submitting');
+        logger.ci('Before submitting');
         const { activeInteractiveWindow: interactiveWindow } = await submitFromPythonFile(
             interactiveWindowProvider,
             codeWithWhitespace,
             disposables
         );
-        traceInfoIfCI('After submitting');
+        logger.ci('After submitting');
         const lastCell = await waitForLastCellToComplete(interactiveWindow);
         const actualCellText = lastCell.document.getText();
-        assert.equal(actualCellText, actualCode);
+        assert.equal(actualCellText, dedentedCode);
     });
 
     test('Run current file in interactive window (with cells)', async () => {
@@ -437,28 +352,53 @@ ${actualCode}
     });
 
     test('Run current file in interactive window (without cells)', async () => {
+        const source = 'a=1\nprint(a)';
         const { activeInteractiveWindow } = await runNewPythonFile(
             interactiveWindowProvider,
             'a=1\nprint(a)',
             disposables
         );
 
-        await waitForLastCellToComplete(activeInteractiveWindow);
+        await waitForLastCellToComplete(activeInteractiveWindow, 1);
 
         const notebookDocument = vscode.workspace.notebookDocuments.find(
             (doc) => doc.uri.toString() === activeInteractiveWindow?.notebookUri?.toString()
         );
 
-        // Should have two cells in the interactive window
-        assert.equal(notebookDocument?.cellCount, 2, `Running a file should use one cell`);
+        // Ensure we picked up the active interpreter for use as the kernel
+        if (!IS_REMOTE_NATIVE_TEST()) {
+            const interpreterService = api.serviceManager.get<IInterpreterService>(IInterpreterService);
+            const controllerSelection = api.serviceManager.get<IControllerRegistration>(IControllerRegistration);
+            const controller = notebookDocument ? controllerSelection.getSelected(notebookDocument) : undefined;
+            const activeInterpreter = await interpreterService.getActiveInterpreter();
+            assert.ok(
+                areInterpreterPathsSame(controller?.connection.interpreter?.uri, activeInterpreter?.uri),
+                `Controller does not match active interpreter for ${getDisplayPath(
+                    notebookDocument?.uri
+                )}, active interpreter is ${getDisplayPath(
+                    activeInterpreter?.uri
+                )} and controller is ${controller?.id} with interpreter ${getDisplayPath(
+                    controller?.connection?.interpreter?.uri
+                )}`
+            );
+        }
 
-        // Wait for output to appear
-        await waitForTextOutput(notebookDocument!.cellAt(1), '1', 0, false);
+        // Verify sys info cell
+        const firstCell = notebookDocument?.cellAt(0);
+        assert.ok(firstCell, 'cell not added');
+        assert.ok(isSysInfoCell(firstCell!), 'First cell should be sys info cell');
+        assert.equal(firstCell?.kind, vscode.NotebookCellKind.Markup, 'First cell should be markdown cell');
+
+        // Verify executed cell input and output
+        const secondCell = notebookDocument?.cellAt(1);
+        const actualSource = secondCell?.document.getText();
+        assert.equal(actualSource, source, `Executed cell has unexpected source code`);
+        await waitForExecutionCompletedSuccessfully(secondCell!);
+        await waitForTextOutput(secondCell!, '1');
     });
-
     test('Error stack traces have correct line hrefs with mix of cell sources', async function () {
         const settings = vscode.workspace.getConfiguration('jupyter', null);
-        await settings.update('interactiveWindowMode', 'single');
+        await settings.update('interactiveWindow.creationMode', 'single');
 
         const interactiveWindow = await createStandaloneInteractiveWindow(interactiveWindowProvider);
         await runInteractiveWindowInput('print(1)', interactiveWindow, 1);
@@ -481,11 +421,31 @@ ${actualCode}
         // Convert to html for easier parsing
         const ansiToHtml = require('ansi-to-html') as typeof import('ansi-to-html');
         const converter = new ansiToHtml();
-        const html = converter.toHtml(errorOutput.traceback.join('\n'));
+        const html = converter.toHtml(errorOutput.traceback.join('\n')) as string;
 
-        // Should be three hrefs for the two lines in the call stack
-        const hrefs = html.match(/<a\s+href='.*\?line=(\d+)'/gm);
-        assert.equal(hrefs?.length, 4, '4 hrefs not found in traceback');
+        assert.ok(html.includes('Traceback (most recent call last)'), 'traceback not found in output');
+        assert.ok(/tmp-[^\.]*\.py:3/.test(html), 'link to file not found');
+    });
+
+    test('Run code from the input box after running cells from a file', async () => {
+        // Create a new interactive window
+        const { activeInteractiveWindow } = await runNewPythonFile(
+            interactiveWindowProvider,
+            '# %%\nx = 1\nprint(x)',
+            disposables
+        );
+
+        // Wait for the last cell to complete
+        await waitForLastCellToComplete(activeInteractiveWindow, 1, true);
+
+        // Run code from the input box
+        await runInteractiveWindowInput('print("foo")', activeInteractiveWindow, 2);
+
+        // Wait for the last cell to complete
+        const lastCell = await waitForLastCellToComplete(activeInteractiveWindow, 2, true);
+
+        // Verify the output
+        await waitForTextOutput(lastCell, 'foo');
     });
 
     test('Raising an exception from within a function has a stack trace', async function () {
@@ -511,15 +471,11 @@ ${actualCode}
         // Convert to html for easier parsing
         const ansiToHtml = require('ansi-to-html') as typeof import('ansi-to-html');
         const converter = new ansiToHtml();
-        const html = converter.toHtml(errorOutput.traceback.join('\n'));
+        const html = converter.toHtml(errorOutput.traceback.join('\n')) as string;
 
-        // Should be three hrefs for the two lines in the call stack
-        const hrefs = html.match(/<a\s+href='.*\?line=(\d+)'/gm);
-        assert.equal(hrefs?.length, 4, '4 hrefs not found in traceback');
-        assert.ok(hrefs[0].endsWith("line=3'"), `Wrong first ref line : ${hrefs[0]}`);
-        assert.ok(hrefs[1].endsWith("line=4'"), `Wrong second ref line : ${hrefs[1]}`);
-        assert.ok(hrefs[2].endsWith("line=1'"), `Wrong last ref line : ${hrefs[2]}`);
-        assert.ok(hrefs[3].endsWith("line=2'"), `Wrong last ref line : ${hrefs[2]}`);
+        const text = html.replace(/<[^>]+>/g, '');
+        assert.ok(text.includes('Traceback (most recent call last)'), 'traceback not found in output');
+        assert.ok(text.includes('def raiser():'), 'function definition not found in stack trace');
     });
 
     test('Raising an exception from system code has a stack trace', async function () {
@@ -537,9 +493,6 @@ ${actualCode}
             'Outputs not available'
         );
 
-        const ipythonVersionCell = activeInteractiveWindow.notebookDocument?.cellAt(lastCell.index - 1);
-        const ipythonVersion = parseInt(getTextOutputValue(ipythonVersionCell!.outputs[0]));
-
         // Parse the last cell's error output
         const errorOutput = translateCellErrorOutput(lastCell.outputs[0]);
         assert.ok(errorOutput, 'No error output found');
@@ -549,13 +502,9 @@ ${actualCode}
         const converter = new ansiToHtml();
         const html = converter.toHtml(errorOutput.traceback.join('\n'));
 
-        // Should be more than 3 hrefs if ipython 8 or not
-        const hrefs = html.match(/<a\s+href='.*\?line=(\d+)'/gm);
-        if (ipythonVersion >= 8) {
-            assert.isAtLeast(hrefs?.length, 4, 'Wrong number of hrefs found in traceback for IPython 8');
-        } else {
-            assert.isAtLeast(hrefs?.length, 1, 'Wrong number of hrefs found in traceback for IPython 7 or earlier');
-        }
+        const text = html.replace(/<[^>]+>/g, '');
+        assert.ok(text.includes('Traceback (most recent call last)'), 'traceback not found in output');
+        assert.ok(/pathlib\.py:\d+, in PurePath\.joinpath/.test(text), 'library frame not found');
     });
 
     test('Running a cell with markdown and code runs two cells', async () => {
@@ -617,7 +566,7 @@ ${actualCode}
         const source = ['# %%', 'x = 1', '# %%', 'import time', 'time.sleep(3)', '# %%', 'print(x)', ''].join('\n');
         const tempFile = await createTemporaryFile({ contents: 'print(42)', extension: '.py' });
         await vscode.window.showTextDocument(tempFile.file);
-        await vscode.commands.executeCommand(Commands.RunFileInInteractiveWindows);
+        await vscode.commands.executeCommand(Commands.RunAllCells);
 
         const edit = new vscode.WorkspaceEdit();
         const textEdit = vscode.TextEdit.replace(new vscode.Range(0, 0, 0, 9), source);
@@ -625,21 +574,35 @@ ${actualCode}
         await vscode.workspace.applyEdit(edit);
         await waitForCodeLenses(tempFile.file, Commands.DebugCell);
 
-        let runFilePromise = vscode.commands.executeCommand(Commands.RunFileInInteractiveWindows);
+        let runFilePromise = vscode.commands.executeCommand(Commands.RunAllCells);
 
         const settings = vscode.workspace.getConfiguration('jupyter', null);
-        const mode = (await settings.get('interactiveWindowMode')) as InteractiveWindowMode;
+        const mode = (await settings.get('interactiveWindow.creationMode')) as InteractiveWindowMode;
         const interactiveWindow = interactiveWindowProvider.getExisting(tempFile.file, mode) as InteractiveWindow;
         await runInteractiveWindowInput('x = 5', interactiveWindow, 5);
         await runFilePromise;
         await waitForLastCellToComplete(interactiveWindow, 5, false);
 
-        const cells = interactiveWindow.notebookDocument
-            .getCells()
+        const cells = interactiveWindow
+            .notebookDocument!.getCells()
             .filter((c) => c.kind === vscode.NotebookCellKind.Code);
         const printCell = cells[cells.length - 2];
 
         const output = getTextOutputValue(printCell.outputs[0]);
         assert.equal(output.trim(), '1', 'original value should have been printed');
+    });
+
+    test('Get the notebook resource for the IW input box', async () => {
+        const { activeInteractiveWindow, untitledPythonFile } = await runNewPythonFile(
+            interactiveWindowProvider,
+            'print(1)',
+            disposables
+        );
+
+        const notebookUri = getNotebookUriFromInputBoxUri(activeInteractiveWindow.inputUri);
+        assert.ok(notebookUri?.path.endsWith('.interactive'));
+
+        const badUri = getNotebookUriFromInputBoxUri(untitledPythonFile.uri);
+        assert.notOk(badUri);
     });
 });

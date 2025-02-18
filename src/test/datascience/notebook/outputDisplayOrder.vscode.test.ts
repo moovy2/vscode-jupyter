@@ -1,22 +1,19 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires */
 import * as path from '../../../platform/vscode-path/path';
 import { assert } from 'chai';
-import { traceInfo } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { EXTENSION_ROOT_DIR_FOR_TESTS } from '../../constants.node';
-import { openNotebook } from '../helpers.node';
 import { closeNotebooksAndCleanUpAfterTests } from './helper.node';
-import { Uri, window } from 'vscode';
+import { Uri, workspace } from 'vscode';
 import { initialize } from '../../initialize.node';
 import type * as nbformat from '@jupyterlab/nbformat';
 import { cellOutputToVSCCellOutput } from '../../../kernels/execution/helpers';
 
 /* eslint-disable @typescript-eslint/no-explicit-any, no-invalid-this */
-suite('DataScience - VSCode Notebook - (Validate Output order)', function () {
+suite('Validate Output order', function () {
     const templateIPynb = path.join(
         EXTENSION_ROOT_DIR_FOR_TESTS,
         'src',
@@ -29,18 +26,17 @@ suite('DataScience - VSCode Notebook - (Validate Output order)', function () {
         await initialize();
     });
     setup(async function () {
-        traceInfo(`Start Test (completed) ${this.currentTest?.title}`);
+        logger.info(`Start Test (completed) ${this.currentTest?.title}`);
     });
     teardown(async function () {
-        traceInfo(`Ended Test ${this.currentTest?.title}`);
+        logger.info(`Ended Test ${this.currentTest?.title}`);
         await closeNotebooksAndCleanUpAfterTests();
-        traceInfo(`Ended Test (completed) ${this.currentTest?.title}`);
+        logger.info(`Ended Test (completed) ${this.currentTest?.title}`);
     });
     suiteTeardown(() => closeNotebooksAndCleanUpAfterTests());
     test('Verify order of outputs in existing ipynb file', async () => {
-        await openNotebook(Uri.file(templateIPynb));
-        const cells = window.activeNotebookEditor?.notebook?.getCells()!;
-
+        const notebook = await workspace.openNotebookDocument(Uri.file(templateIPynb));
+        const cells = notebook.getCells()!;
         const expectedOutputItemMimeTypes = [
             [['text/html', 'text/plain']],
             [['application/javascript', 'text/plain']],

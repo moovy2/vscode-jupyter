@@ -1,25 +1,47 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 export const HiddenFileFormatString = '_HiddenFile_{0}.py';
 
 export const MillisecondsInADay = 24 * 60 * 60 * 1_000;
 
-declare var IS_PRE_RELEASE_VERSION_OF_JUPYTER_EXTENSION: 'true' | 'false';
-export function isPreReleaseVersion() {
+export function isPreReleaseVersion(): boolean {
     try {
-        if (IS_PRE_RELEASE_VERSION_OF_JUPYTER_EXTENSION === 'true') {
-            return 'true';
-        } else if (IS_PRE_RELEASE_VERSION_OF_JUPYTER_EXTENSION === 'false') {
-            return 'false';
-        } else {
-            // No idea, possible webpack is not replacing the value, meaning we're in dev mode.
-            return 'true';
-        }
+        return require('vscode-jupyter-release-version').isPreRelesVersionOfJupyterExtension === true;
     } catch {
         // Dev version is treated as pre-release.
-        return 'true';
+        return true;
     }
+}
+
+export const Exiting = {
+    /**
+     * Whether VS Code is shutting down or the like (e.g. reloading).
+     */
+    isExiting: false
+};
+
+export const TestingKernelPickerProviderId = '_builtin.JupyterServerSelectorForTesting';
+export const UserJupyterServerPickerProviderId = '_builtin.jupyterServerUrlProvider';
+
+export function isBuiltInJupyterProvider(id: string) {
+    return id === TestingKernelPickerProviderId || id === UserJupyterServerPickerProviderId;
+}
+
+let isCodeSpaceValue = false;
+export function setIsCodeSpace(value: boolean) {
+    isCodeSpaceValue = value;
+}
+
+export function isCodeSpace() {
+    return isCodeSpaceValue;
+}
+
+let isWebExtensionValue = false;
+export function setIsWebExtension(value: boolean) {
+    isWebExtensionValue = value;
+}
+
+export function isWebExtension() {
+    return isWebExtensionValue;
 }

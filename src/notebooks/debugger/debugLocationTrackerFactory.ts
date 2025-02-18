@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import { inject, injectable } from 'inversify';
 import { DebugAdapterTracker, DebugAdapterTrackerFactory, DebugSession, Event, EventEmitter } from 'vscode';
 
@@ -16,6 +15,7 @@ export class DebugLocationTrackerFactory
     implements IDebugLocationTracker, IDebugLocationTrackerFactory, DebugAdapterTrackerFactory
 {
     private activeTrackers = new WeakMap<DebugSession, DebugLocationTracker>();
+    private activeTrackersById = new Map<string, DebugLocationTracker>();
     private updatedEmitter: EventEmitter<void> = new EventEmitter<void>();
 
     constructor(
@@ -28,7 +28,15 @@ export class DebugLocationTrackerFactory
     public createDebugAdapterTracker(session: DebugSession): DebugAdapterTracker {
         const result = new DebugLocationTracker(session.id);
         this.activeTrackers.set(session, result);
-        result.sessionEnded(() => this.activeTrackers.delete(session), this, this.disposableRegistry);
+        this.activeTrackersById.set(session.id, result);
+        result.sessionEnded(
+            () => {
+                this.activeTrackers.delete(session);
+                this.activeTrackersById.delete(session.id);
+            },
+            this,
+            this.disposableRegistry
+        );
         result.debugLocationUpdated(this.onLocationUpdated, this, this.disposableRegistry);
         this.onLocationUpdated();
         return result;
@@ -39,7 +47,7 @@ export class DebugLocationTrackerFactory
     }
 
     public getLocation(session: DebugSession) {
-        const tracker = this.activeTrackers.get(session);
+        const tracker = this.activeTrackers.get(session) || this.activeTrackersById.get(session.id);
         if (tracker) {
             return tracker.debugLocation;
         }

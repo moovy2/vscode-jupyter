@@ -1,21 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import '../../../platform/common/extensions';
-
 import { inject, injectable } from 'inversify';
 import * as path from '../../../platform/vscode-path/path';
-import { Event, EventEmitter, Uri, ViewColumn } from 'vscode';
+import { Event, EventEmitter, Uri, ViewColumn, window } from 'vscode';
 
-import { traceError, traceInfo } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { PlotViewerMessageListener } from './plotViewerMessageListener';
 import { IExportPlotRequest, IPlotViewer, IPlotViewerMapping, PlotViewerMessages } from './types';
-import {
-    IWebviewPanelProvider,
-    IWorkspaceService,
-    IApplicationShell
-} from '../../../platform/common/application/types';
+import { IWebviewPanelProvider } from '../../../platform/common/application/types';
 import { IConfigurationService, IDisposable, IExtensionContext } from '../../../platform/common/types';
 import { IFileSystem } from '../../../platform/common/platform/types';
 import * as localize from '../../../platform/common/utils/localize';
@@ -24,6 +17,7 @@ import { joinPath } from '../../../platform/vscode-path/resources';
 import { noop } from '../../../platform/common/utils/misc';
 import { sendTelemetryEvent, Telemetry } from '../../../telemetry';
 import { StopWatch } from '../../../platform/common/utils/stopWatch';
+import { base64ToUint8Array } from '../../../platform/common/utils/string';
 
 @injectable()
 export class PlotViewer extends WebviewPanelHost<IPlotViewerMapping> implements IPlotViewer, IDisposable {
@@ -33,27 +27,24 @@ export class PlotViewer extends WebviewPanelHost<IPlotViewerMapping> implements 
     constructor(
         @inject(IWebviewPanelProvider) provider: IWebviewPanelProvider,
         @inject(IConfigurationService) configuration: IConfigurationService,
-        @inject(IWorkspaceService) workspaceService: IWorkspaceService,
-        @inject(IApplicationShell) protected applicationShell: IApplicationShell,
         @inject(IFileSystem) protected fs: IFileSystem,
         @inject(IExtensionContext) readonly context: IExtensionContext
     ) {
         const startupTimer = new StopWatch();
-        const plotDir = joinPath(context.extensionUri, 'out', 'webviews', 'webview-side', 'viewers');
+        const plotDir = joinPath(context.extensionUri, 'dist', 'webviews', 'webview-side', 'viewers');
         super(
             configuration,
             provider,
-            workspaceService,
             (c, v, d) => new PlotViewerMessageListener(c, v, d),
             plotDir,
             [joinPath(plotDir, 'plotViewer.js')],
-            localize.DataScience.plotViewerTitle(),
+            localize.DataScience.plotViewerTitle,
             ViewColumn.One
         );
         // Load the web panel using our current directory as we don't expect to load any other files
         super
             .loadWebview(Uri.file(process.cwd()))
-            .catch(traceError)
+            .catch(logger.error)
             .finally(() => {
                 // Send our telemetry for the webview loading when the load is done.
                 sendTelemetryEvent(Telemetry.PlotViewerWebviewLoaded, { duration: startupTimer.elapsedTime });
@@ -81,7 +72,7 @@ export class PlotViewer extends WebviewPanelHost<IPlotViewerMapping> implements 
             await super.show(false);
 
             // Send a message with our data
-            this.postMessage(PlotViewerMessages.SendPlot, imageHtml).ignoreErrors();
+            this.postMessage(PlotViewerMessages.SendPlot, imageHtml).catch(noop);
         }
     };
 
@@ -101,11 +92,11 @@ export class PlotViewer extends WebviewPanelHost<IPlotViewerMapping> implements 
     protected override onMessage(message: string, payload: any) {
         switch (message) {
             case PlotViewerMessages.CopyPlot:
-                this.copyPlot(payload.toString()).ignoreErrors();
+                this.copyPlot(payload.toString()).catch(noop);
                 break;
 
             case PlotViewerMessages.ExportPlot:
-                this.exportPlot(payload).ignoreErrors();
+                this.exportPlot(payload).catch(noop);
                 break;
 
             case PlotViewerMessages.RemovePlot:
@@ -130,14 +121,14 @@ export class PlotViewer extends WebviewPanelHost<IPlotViewerMapping> implements 
     }
 
     protected async exportPlot(payload: IExportPlotRequest): Promise<void> {
-        traceInfo('exporting plot...');
+        logger.info('exporting plot...');
         const filtersObject: Record<string, string[]> = {};
-        filtersObject[localize.DataScience.pngFilter()] = ['png'];
-        filtersObject[localize.DataScience.svgFilter()] = ['svg'];
+        filtersObject[localize.DataScience.pngFilter] = ['png'];
+        filtersObject[localize.DataScience.svgFilter] = ['svg'];
 
         // Ask the user what file to save to
-        const file = await this.applicationShell.showSaveDialog({
-            saveLabel: localize.DataScience.exportPlotTitle(),
+        const file = await window.showSaveDialog({
+            saveLabel: localize.DataScience.exportPlotTitle,
             filters: filtersObject
         });
         try {
@@ -145,7 +136,7 @@ export class PlotViewer extends WebviewPanelHost<IPlotViewerMapping> implements 
                 const ext = path.extname(file.path);
                 switch (ext.toLowerCase()) {
                     case '.png':
-                        const buffer = Buffer.from(payload.png.replace('data:image/png;base64', ''), 'base64');
+                        const buffer = base64ToUint8Array(payload.png.replace('data:image/png;base64', ''));
                         await this.fs.writeFile(file, buffer);
                         break;
 
@@ -157,8 +148,8 @@ export class PlotViewer extends WebviewPanelHost<IPlotViewerMapping> implements 
                 }
             }
         } catch (e) {
-            traceError(e);
-            this.applicationShell.showErrorMessage(localize.DataScience.exportImageFailed().format(e)).then(noop, noop);
+            logger.error(e);
+            window.showErrorMessage(localize.DataScience.exportImageFailed(e.toString())).then(noop, noop);
         }
     }
 }

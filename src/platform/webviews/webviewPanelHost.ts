@@ -1,9 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import '../common/extensions';
-
 import { Uri, ViewColumn, WebviewPanel as vscodeWebviewPanel } from 'vscode';
 
 import { WebviewHost } from './webviewHost';
@@ -11,7 +8,6 @@ import {
     IWebviewPanel,
     IWebviewPanelMessageListener,
     IWebviewPanelProvider,
-    IWorkspaceService,
     IWebview
 } from '../common/application/types';
 import { IConfigurationService, IDisposable, Resource } from '../common/types';
@@ -34,7 +30,6 @@ export abstract class WebviewPanelHost<IMapping> extends WebviewHost<IMapping> i
     constructor(
         protected override configService: IConfigurationService,
         private provider: IWebviewPanelProvider,
-        protected override workspaceService: IWorkspaceService,
         messageListenerCtor: (
             callback: (message: string, payload: {}) => void,
             viewChanged: (panel: IWebviewPanel) => void,
@@ -45,7 +40,7 @@ export abstract class WebviewPanelHost<IMapping> extends WebviewHost<IMapping> i
         private _title: string,
         private viewColumn: ViewColumn
     ) {
-        super(configService, workspaceService, rootPath, scripts);
+        super(configService, rootPath, scripts);
 
         // Create our message listener for our web panel.
         this.messageListener = messageListenerCtor(

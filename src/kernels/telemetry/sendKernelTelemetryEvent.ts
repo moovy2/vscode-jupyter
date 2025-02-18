@@ -2,15 +2,9 @@
 // Licensed under the MIT License.
 
 import { Resource } from '../../platform/common/types';
-import { sendTelemetryEvent, waitBeforeSending, IEventNamePropertyMapping, TelemetryEventInfo } from '../../telemetry';
+import { sendTelemetryEvent, IEventNamePropertyMapping, TelemetryEventInfo } from '../../telemetry';
 import { getContextualPropsForTelemetry } from '../../platform/telemetry/telemetry';
-import { ExcludeType, PickType, UnionToIntersection } from '../../platform/common/utils/misc';
-
-/**
- * @param {(P[E] & { waitBeforeSending: Promise<void> })} [properties]
- * Can optionally contain a property `waitBeforeSending` referencing a promise.
- * Which must be awaited before sending the telemetry.
- */
+import { ExcludeType, noop, PickType, UnionToIntersection } from '../../platform/common/utils/misc';
 
 export function sendKernelTelemetryEvent<P extends IEventNamePropertyMapping, E extends keyof P>(
     resource: Resource,
@@ -20,9 +14,9 @@ export function sendKernelTelemetryEvent<P extends IEventNamePropertyMapping, E 
         | undefined,
     properties?: P[E] extends TelemetryEventInfo<infer R>
         ? ExcludeType<R, number> extends never | undefined
-            ? undefined | { [waitBeforeSending]?: Promise<void> }
-            : Partial<ExcludeType<R, number>> & { [waitBeforeSending]?: Promise<void> }
-        : undefined | { [waitBeforeSending]?: Promise<void> } | (undefined | { [waitBeforeSending]?: Promise<void> }),
+            ? undefined
+            : Partial<ExcludeType<R, number>>
+        : undefined | undefined,
     ex?: Error | undefined
 ) {
     getContextualPropsForTelemetry(resource)
@@ -31,5 +25,5 @@ export function sendKernelTelemetryEvent<P extends IEventNamePropertyMapping, E 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             sendTelemetryEvent(eventName as any, measures as any, props as any, ex);
         })
-        .ignoreErrors();
+        .catch(noop);
 }

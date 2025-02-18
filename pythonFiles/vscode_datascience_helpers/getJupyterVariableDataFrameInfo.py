@@ -14,6 +14,7 @@ _VSCode_supportsDataExplorer = (
 # Indexes off of _VSCODE_targetVariable need to index types that are part of IJupyterVariable
 _VSCODE_targetVariable = _VSCODE_json.loads("""_VSCode_JupyterTestValue""")
 
+
 # Function to compute row count for a value
 def _VSCODE_getRowCount(var):
     if hasattr(var, "shape"):
@@ -56,6 +57,9 @@ else:
         _VSCODE_df = _VSCODE_pd.DataFrame(_VSCODE_evalResult)
     elif hasattr(_VSCODE_df, "toPandas"):
         _VSCODE_df = _VSCODE_df.toPandas()
+        _VSCODE_targetVariable["rowCount"] = _VSCODE_getRowCount(_VSCODE_df)
+    elif hasattr(_VSCODE_df, "to_pandas"):
+        _VSCODE_df = _VSCODE_df.to_pandas()
         _VSCODE_targetVariable["rowCount"] = _VSCODE_getRowCount(_VSCODE_df)
 
     # If any rows, use pandas json to convert a single row to json. Extract

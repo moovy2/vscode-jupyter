@@ -1,15 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { NotebookCell } from 'vscode';
+import { NotebookCell, Position, commands } from 'vscode';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import { INotebookKernelExecution } from '../../../kernels/types';
-import { ICommandManager } from '../../../platform/common/application/types';
 import { Commands } from '../../../platform/common/constants';
+import { splitLines } from '../../../platform/common/helpers';
 import { IConfigurationService } from '../../../platform/common/types';
 import { parseForComments } from '../../../platform/common/utils';
 import { noop } from '../../../platform/common/utils/misc';
-import { traceInfoIfCI, traceVerbose } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import * as path from '../../../platform/vscode-path/path';
 import { sendTelemetryEvent } from '../../../telemetry';
 import { DebuggingTelemetry } from '../constants';
@@ -22,11 +22,11 @@ import { isJustMyCodeNotification } from './debugCellController';
  */
 export class RunByLineController implements IDebuggingDelegate {
     private lastPausedThreadId: number | undefined;
+    private lastPausePosition: Position | undefined;
 
     constructor(
         private readonly debugAdapter: IKernelDebugAdapter,
         public readonly debugCell: NotebookCell,
-        private readonly commandManager: ICommandManager,
         private readonly execution: INotebookKernelExecution,
         private readonly settings: IConfigurationService
     ) {
@@ -35,7 +35,7 @@ export class RunByLineController implements IDebuggingDelegate {
 
     public continue(): void {
         if (typeof this.lastPausedThreadId !== 'number') {
-            traceVerbose(`No paused thread, can't do RBL`);
+            logger.debug(`No paused thread, can't do RBL`);
             this.stop();
             return;
         }
@@ -44,7 +44,7 @@ export class RunByLineController implements IDebuggingDelegate {
     }
 
     public stop(): void {
-        traceInfoIfCI(`RunbylineController::stop()`);
+        logger.ci(`RunbylineController::stop()`);
         // When debugpy gets stuck, running a cell fixes it and allows us to start another debugging session
         this.execution.executeHidden('pass').then(noop, noop);
         this.debugAdapter.disconnect().then(noop, noop);
@@ -75,7 +75,7 @@ export class RunByLineController implements IDebuggingDelegate {
     }
 
     public async willSendRequest(request: DebugProtocol.Request): Promise<undefined> {
-        traceInfoIfCI(`willSendRequest: ${request.command}`);
+        logger.ci(`willSendRequest: ${request.command}`);
         if (request.command === 'configurationDone') {
             await this.initializeExecute();
         }
@@ -99,6 +99,14 @@ export class RunByLineController implements IDebuggingDelegate {
 
         if (stResponse && stResponse.stackFrames[0]) {
             const sf = stResponse.stackFrames[0];
+            const pausePos = new Position(sf.line, sf.column);
+            if (this.lastPausePosition?.isEqual(pausePos)) {
+                // This is a workaround for https://github.com/microsoft/debugpy/issues/1104
+                this.trace('intercept', 'working around duplicate stop event');
+                return true;
+            }
+
+            this.lastPausePosition = pausePos;
             return !!sf.source && sf.source.path !== this.debugCell.document.uri.toString();
         }
 
@@ -106,7 +114,7 @@ export class RunByLineController implements IDebuggingDelegate {
     }
 
     private trace(tag: string, msg: string) {
-        traceVerbose(`[Debug-RBL] ${tag}: ${msg}`);
+        logger.debug(`[Debug-RBL] ${tag}: ${msg}`);
     }
 
     private async initializeExecute() {
@@ -114,7 +122,7 @@ export class RunByLineController implements IDebuggingDelegate {
 
         // This will save the code lines of the cell in lineList (so ignore comments and emtpy lines)
         // Its done to set the Run by Line breakpoint on the first code line
-        const textLines = this.debugCell.document.getText().splitLines({ trim: false, removeEmptyEntries: false });
+        const textLines = splitLines(this.debugCell.document.getText(), { trim: false, removeEmptyEntries: false });
         const lineList: number[] = [];
         parseForComments(
             textLines,
@@ -142,14 +150,14 @@ export class RunByLineController implements IDebuggingDelegate {
             });
 
             // Open variables view
-            const settings = this.settings.getSettings();
+            const settings = this.settings.getSettings(this.debugCell.notebook.uri);
             if (settings.showVariableViewWhenDebugging) {
-                this.commandManager.executeCommand(Commands.OpenVariableView).then(noop, noop);
+                commands.executeCommand(Commands.OpenVariableView).then(noop, noop);
             }
         }
 
         // Run cell
-        this.commandManager
+        commands
             .executeCommand('notebook.cell.execute', {
                 ranges: [{ start: this.debugCell.index, end: this.debugCell.index + 1 }],
                 document: this.debugCell.notebook.uri

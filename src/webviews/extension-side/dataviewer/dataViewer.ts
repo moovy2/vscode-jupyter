@@ -1,11 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import '../../../platform/common/extensions';
-
 import { inject, injectable, named } from 'inversify';
-import { EventEmitter, Memento, Uri, ViewColumn } from 'vscode';
+import { commands, EventEmitter, Memento, Uri, ViewColumn, env, window } from 'vscode';
 
 import { capturePerfTelemetry, sendTelemetryEvent } from '../../../telemetry';
 import { JupyterDataRateLimitError } from '../../../platform/errors/jupyterDataRateLimitError';
@@ -23,13 +20,9 @@ import {
 import { isValidSliceExpression, preselectedSliceExpression } from '../../webview-side/data-explorer/helpers';
 import { CheckboxState } from '../../../platform/telemetry/constants';
 import { IKernel } from '../../../kernels/types';
-import {
-    IWebviewPanelProvider,
-    IWorkspaceService,
-    IApplicationShell
-} from '../../../platform/common/application/types';
+import { IWebviewPanelProvider } from '../../../platform/common/application/types';
 import { HelpLinks, Telemetry } from '../../../platform/common/constants';
-import { traceError, traceInfo } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import {
     IConfigurationService,
     IMemento,
@@ -78,21 +71,18 @@ export class DataViewer extends WebviewPanelHost<IDataViewerMapping> implements 
     constructor(
         @inject(IWebviewPanelProvider) provider: IWebviewPanelProvider,
         @inject(IConfigurationService) configuration: IConfigurationService,
-        @inject(IWorkspaceService) workspaceService: IWorkspaceService,
-        @inject(IApplicationShell) private applicationShell: IApplicationShell,
         @inject(IMemento) @named(GLOBAL_MEMENTO) readonly globalMemento: Memento,
         @inject(IDataScienceErrorHandler) readonly errorHandler: IDataScienceErrorHandler,
         @inject(IExtensionContext) readonly context: IExtensionContext
     ) {
-        const dataExplorerDir = joinPath(context.extensionUri, 'out', 'webviews', 'webview-side', 'viewers');
+        const dataExplorerDir = joinPath(context.extensionUri, 'dist', 'webviews', 'webview-side', 'viewers');
         super(
             configuration,
             provider,
-            workspaceService,
             (c, v, d) => new DataViewerMessageListener(c, v, d),
             dataExplorerDir,
             [joinPath(dataExplorerDir, 'dataExplorer.js')],
-            localize.DataScience.dataExplorerTitle(),
+            localize.DataScience.dataExplorerTitle,
             globalMemento.get(PREFERRED_VIEWGROUP) ?? ViewColumn.One
         );
         this.onDidDispose(this.dataViewerDisposed, this);
@@ -108,7 +98,7 @@ export class DataViewer extends WebviewPanelHost<IDataViewerMapping> implements 
             this.dataProvider = dataProvider;
 
             // Load the web panel using our current directory as we don't expect to load any other files
-            await super.loadWebview(Uri.file(process.cwd())).catch(traceError);
+            await super.loadWebview(Uri.file(process.cwd())).catch(logger.error);
 
             super.setTitle(title);
 
@@ -125,7 +115,7 @@ export class DataViewer extends WebviewPanelHost<IDataViewerMapping> implements 
             }
 
             // Send a message with our data
-            this.postMessage(DataViewerMessages.InitializeData, dataFrameInfo).ignoreErrors();
+            this.postMessage(DataViewerMessages.InitializeData, dataFrameInfo).catch(noop);
         }
     }
 
@@ -159,9 +149,9 @@ export class DataViewer extends WebviewPanelHost<IDataViewerMapping> implements 
                 dataFrameInfo = await this.getDataFrameInfo(newSlice);
             }
         }
-        traceInfo(`Refreshing data viewer for variable ${dataFrameInfo.name}`);
+        logger.info(`Refreshing data viewer for variable ${dataFrameInfo.name}`);
         // Send a message with our data
-        this.postMessage(DataViewerMessages.InitializeData, dataFrameInfo).ignoreErrors();
+        this.postMessage(DataViewerMessages.InitializeData, dataFrameInfo).catch(noop);
     }
 
     public override dispose(): void {
@@ -189,19 +179,19 @@ export class DataViewer extends WebviewPanelHost<IDataViewerMapping> implements 
     protected override onMessage(message: string, payload: any) {
         switch (message) {
             case DataViewerMessages.GetAllRowsRequest:
-                this.getAllRows(payload as string).ignoreErrors();
+                this.getAllRows(payload as string).catch(noop);
                 break;
 
             case DataViewerMessages.GetRowsRequest:
-                this.getRowChunk(payload as IGetRowsRequest).ignoreErrors();
+                this.getRowChunk(payload as IGetRowsRequest).catch(noop);
                 break;
 
             case DataViewerMessages.GetSliceRequest:
-                this.getSlice(payload as IGetSliceRequest).ignoreErrors();
+                this.getSlice(payload as IGetSliceRequest).catch(noop);
                 break;
 
             case DataViewerMessages.RefreshDataViewer:
-                this.refreshData().ignoreErrors();
+                this.refreshData().catch(noop);
                 void sendTelemetryEvent(Telemetry.RefreshDataViewer);
                 break;
 
@@ -209,6 +199,10 @@ export class DataViewer extends WebviewPanelHost<IDataViewerMapping> implements 
                 void sendTelemetryEvent(Telemetry.DataViewerSliceEnablementStateChanged, undefined, {
                     newState: payload.newState ? CheckboxState.Checked : CheckboxState.Unchecked
                 });
+                break;
+
+            case DataViewerMessages.DeprecationWarningClicked:
+                commands.executeCommand('workbench.extensions.search', '@tag:jupyterVariableViewers').then(noop, noop);
                 break;
 
             default:
@@ -297,19 +291,17 @@ export class DataViewer extends WebviewPanelHost<IDataViewerMapping> implements 
             return await func();
         } catch (e) {
             if (e instanceof JupyterDataRateLimitError) {
-                traceError(e.message);
-                const actionTitle = localize.DataScience.pythonInteractiveHelpLink();
-                this.applicationShell
-                    .showErrorMessage(localize.DataScience.jupyterDataRateExceeded(), actionTitle)
-                    .then((v) => {
-                        // User clicked on the link, open it.
-                        if (v === actionTitle) {
-                            this.applicationShell.openUrl(HelpLinks.JupyterDataRateHelpLink);
-                        }
-                    }, noop);
+                logger.error(e.message);
+                const actionTitle = localize.DataScience.pythonInteractiveHelpLink;
+                window.showErrorMessage(localize.DataScience.jupyterDataRateExceeded, actionTitle).then((v) => {
+                    // User clicked on the link, open it.
+                    if (v === actionTitle) {
+                        void env.openExternal(Uri.parse(HelpLinks.JupyterDataRateHelpLink));
+                    }
+                }, noop);
                 this.dispose();
             }
-            traceError(e);
+            logger.error(e);
             this.errorHandler.handleError(e).then(noop, noop);
         } finally {
             this.sendElapsedTimeTelemetry();

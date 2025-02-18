@@ -1,48 +1,39 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { inject, injectable, named } from 'inversify';
-import { CancellationToken, NotebookDocument, Uri, workspace } from 'vscode';
+import { inject } from 'inversify';
+import { CancellationToken, NotebookDocument, Uri, window, workspace } from 'vscode';
 import { sendTelemetryEvent } from '../../telemetry';
-import { IApplicationShell } from '../../platform/common/application/types';
 import { Telemetry } from '../../platform/common/constants';
 import { IConfigurationService } from '../../platform/common/types';
 import * as localize from '../../platform/common/utils/localize';
 import { noop } from '../../platform/common/utils/misc';
-import { traceError } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { ProgressReporter } from '../../platform/progress/progressReporter';
 import { PythonEnvironment } from '../../platform/pythonEnvironments/info';
 import { ExportFileOpener } from './exportFileOpener';
-import { ExportUtilBase } from './exportUtil';
-import { ExportFormat, IExport, IExportDialog, IFileConverter, INbConvertExport } from './types';
+import { ExportFormat, IExportUtil, IFileConverter } from './types';
+import { ExportToPython } from './exportToPython';
+import { ExportToPDF } from './exportToPDF';
+import { ExportToHTML } from './exportToHTML';
+import { ExportToPythonPlain } from './exportToPythonPlain';
 
 /**
  * Converts different file formats to others. Used in export.
  */
-@injectable()
-export class FileConverter implements IFileConverter {
+export abstract class FileConverterBase implements IFileConverter {
     constructor(
-        @inject(IExport) @named(ExportFormat.python) private readonly exportToPythonPlain: IExport,
-        @inject(INbConvertExport) @named(ExportFormat.pdf) private readonly exportToPDF: INbConvertExport,
-        @inject(INbConvertExport) @named(ExportFormat.html) private readonly exportToHTML: INbConvertExport,
-        @inject(INbConvertExport) @named(ExportFormat.python) private readonly exportToPython: INbConvertExport,
-        @inject(IExportDialog) protected readonly filePicker: IExportDialog,
-        @inject(ExportUtilBase) protected readonly exportUtil: ExportUtilBase,
+        @inject(IExportUtil) protected readonly exportUtil: IExportUtil,
         @inject(ProgressReporter) private readonly progressReporter: ProgressReporter,
-        @inject(IApplicationShell) private readonly applicationShell: IApplicationShell,
-        @inject(ExportFileOpener) protected readonly exportFileOpener: ExportFileOpener,
         @inject(IConfigurationService) protected readonly configuration: IConfigurationService
     ) {}
 
     async importIpynb(source: Uri): Promise<void> {
-        const reporter = this.progressReporter.createProgressIndicator(localize.DataScience.importingIpynb(), true);
-        let nbDoc;
+        const reporter = this.progressReporter.createProgressIndicator(localize.DataScience.importingIpynb, true);
         try {
             // Open the source as a NotebookDocument, note that this doesn't actually show an editor, and we don't need
             // a specific close action as VS Code owns the lifetime
-            nbDoc = await workspace.openNotebookDocument(source);
+            const nbDoc = await workspace.openNotebookDocument(source);
             await this.exportImpl(ExportFormat.python, nbDoc, undefined, reporter.token);
         } finally {
             reporter.dispose();
@@ -56,7 +47,7 @@ export class FileConverter implements IFileConverter {
         candidateInterpreter?: PythonEnvironment
     ): Promise<undefined> {
         const reporter = this.progressReporter.createProgressIndicator(
-            localize.DataScience.exportingToFormat().format(format.toString()),
+            localize.DataScience.exportingToFormat(format.toString()),
             true
         );
 
@@ -86,14 +77,14 @@ export class FileConverter implements IFileConverter {
             }
             await this.performExport(format, sourceDocument, target, token, candidateInterpreter);
         } catch (e) {
-            traceError('Export failed', e);
+            logger.error('Export failed', e);
             sendTelemetryEvent(Telemetry.ExportNotebookAsFailed, undefined, { format: format });
 
             if (format === ExportFormat.pdf) {
-                traceError(localize.DataScience.exportToPDFDependencyMessage());
+                logger.error(localize.DataScience.exportToPDFDependencyMessage);
             }
 
-            this.showExportFailed(localize.DataScience.exportFailedGeneralMessage());
+            this.showExportFailed(localize.DataScience.exportFailedGeneralMessage);
         }
     }
 
@@ -124,7 +115,7 @@ export class FileConverter implements IFileConverter {
     }
 
     protected async openExportedFile(format: ExportFormat, target: Uri) {
-        await this.exportFileOpener.openFile(format, target, true).catch(noop);
+        await new ExportFileOpener().openFile(format, target, true).catch(noop);
     }
 
     protected async performPlainExport(
@@ -136,7 +127,7 @@ export class FileConverter implements IFileConverter {
         if (target) {
             switch (format) {
                 case ExportFormat.python:
-                    await this.exportToPythonPlain.export(sourceDocument, target, cancelToken);
+                    await new ExportToPythonPlain().export(sourceDocument, target, cancelToken);
                     break;
             }
         }
@@ -166,13 +157,13 @@ export class FileConverter implements IFileConverter {
     ) {
         switch (format) {
             case ExportFormat.python:
-                return await this.exportToPython.export(sourceDocument, target, interpreter, cancelToken);
+                return new ExportToPython().export(sourceDocument, target, interpreter!, cancelToken);
 
             case ExportFormat.pdf:
-                return await this.exportToPDF.export(sourceDocument, target, interpreter, cancelToken);
+                return new ExportToPDF().export(sourceDocument, target, interpreter!, cancelToken);
 
             case ExportFormat.html:
-                return await this.exportToHTML.export(sourceDocument, target, interpreter, cancelToken);
+                return new ExportToHTML().export(sourceDocument, target, interpreter!, cancelToken);
 
             default:
                 break;
@@ -180,7 +171,6 @@ export class FileConverter implements IFileConverter {
     }
 
     private showExportFailed(msg: string) {
-        // eslint-disable-next-line
-        this.applicationShell.showErrorMessage(`${localize.DataScience.failedExportMessage()} ${msg}`).then();
+        void window.showErrorMessage(`${localize.DataScience.failedExportMessage} ${msg}`);
     }
 }

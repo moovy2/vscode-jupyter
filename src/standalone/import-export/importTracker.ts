@@ -1,30 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { inject, injectable } from 'inversify';
-import {
-    NotebookCell,
-    NotebookCellExecutionState,
-    NotebookCellKind,
-    NotebookDocument,
-    TextDocument,
-    Uri
-} from 'vscode';
-import { ResourceTypeTelemetryProperty, sendTelemetryEvent } from '../../telemetry';
-import { IExtensionSingleActivationService } from '../../platform/activation/types';
-import { IVSCodeNotebook, IWorkspaceService } from '../../platform/common/application/types';
+import { Disposable, NotebookCell, NotebookCellKind, NotebookDocument, TextDocument, Uri, workspace } from 'vscode';
+import { ResourceTypeTelemetryProperty, onDidChangeTelemetryEnablement, sendTelemetryEvent } from '../../telemetry';
+import { IExtensionSyncActivationService } from '../../platform/activation/types';
 import { isCI, isTestExecution, JupyterNotebookView, PYTHON_LANGUAGE } from '../../platform/common/constants';
-import '../../platform/common/extensions';
-import { disposeAllDisposables } from '../../platform/common/helpers';
-import { IDisposable, IDisposableRegistry } from '../../platform/common/types';
+import { DisposableStore, dispose } from '../../platform/common/utils/lifecycle';
+import { IDisposableRegistry, type IDisposable } from '../../platform/common/types';
 import { noop } from '../../platform/common/utils/misc';
 import { EventName } from '../../platform/telemetry/constants';
 import { getTelemetrySafeHashedString } from '../../platform/telemetry/helpers';
 import { isJupyterNotebook } from '../../platform/common/utils';
-import { ResourceMap } from '../../platform/vscode-path/map';
 import { isTelemetryDisabled } from '../../telemetry';
+import { ResourceMap } from '../../platform/common/utils/map';
+import { Delayer } from '../../platform/common/utils/async';
+import { NotebookCellExecutionState, notebookCellExecutions } from '../../platform/notebooks/cellExecutionStateService';
 
 /*
 Python has a fairly rich import statement. Originally the matching regexp was kept simple for
@@ -55,56 +46,44 @@ const MAX_DOCUMENT_LINES = 1000;
 // have this value set.
 const testExecution = isTestExecution();
 
-export const IImportTracker = Symbol('IImportTracker');
-export interface IImportTracker {}
-
 /**
  * Sends hashed names of imported packages to telemetry. Hashes are updated on opening, closing, and saving of documents.
  */
 @injectable()
-export class ImportTracker implements IExtensionSingleActivationService, IDisposable {
-    private pendingChecks = new ResourceMap<NodeJS.Timer | number>();
-    private disposables: IDisposable[] = [];
+export class ImportTracker implements IExtensionSyncActivationService {
+    private pendingChecks = new ResourceMap<IDisposable>();
+    private disposables = new DisposableStore();
     private sentMatches = new Set<string>();
-    private get isTelemetryDisabled() {
-        return isTelemetryDisabled(this.workspace);
-    }
-    constructor(
-        @inject(IVSCodeNotebook) private vscNotebook: IVSCodeNotebook,
-        @inject(IDisposableRegistry) disposables: IDisposableRegistry,
-        @inject(IWorkspaceService) private readonly workspace: IWorkspaceService
-    ) {
-        disposables.push(this);
-        this.vscNotebook.onDidOpenNotebookDocument(
-            (t) => this.onOpenedOrClosedNotebookDocument(t, 'onOpenCloseOrSave'),
-            this.disposables
+    private readonly processedNotebookCells = new WeakMap<NotebookCell, number>();
+    private isTelemetryDisabled: boolean;
+    constructor(@inject(IDisposableRegistry) disposables: IDisposableRegistry, delay = 1_000) {
+        disposables.push(this.disposables);
+        this.disposables.add(new Disposable(() => dispose(this.pendingChecks.values())));
+        this.isTelemetryDisabled = isTelemetryDisabled();
+        this.disposables.add(
+            workspace.onDidOpenNotebookDocument((t) => this.onOpenedOrClosedNotebookDocument(t, 'onOpenCloseOrSave'))
         );
-        this.vscNotebook.onDidCloseNotebookDocument(
-            (t) => this.onOpenedOrClosedNotebookDocument(t, 'onOpenCloseOrSave'),
-            this.disposables
+        this.disposables.add(
+            workspace.onDidCloseNotebookDocument((t) => this.onOpenedOrClosedNotebookDocument(t, 'onOpenCloseOrSave'))
         );
-        this.vscNotebook.onDidSaveNotebookDocument(
-            (t) => this.onOpenedOrClosedNotebookDocument(t, 'onOpenCloseOrSave'),
-            this.disposables
+        this.disposables.add(
+            workspace.onDidSaveNotebookDocument((t) => this.onOpenedOrClosedNotebookDocument(t, 'onOpenCloseOrSave'))
         );
-        this.vscNotebook.onDidChangeNotebookCellExecutionState(
-            (e) => {
-                if (e.state == NotebookCellExecutionState.Pending && !this.isTelemetryDisabled) {
-                    this.checkNotebookCell(e.cell, 'onExecution').ignoreErrors();
-                }
-            },
-            this,
-            disposables
+        const delayer = this.disposables.add(new Delayer<void>(delay));
+        this.disposables.add(
+            notebookCellExecutions.onDidChangeNotebookCellExecutionState((e) => {
+                void delayer.trigger(() => {
+                    if (e.state == NotebookCellExecutionState.Pending && !this.isTelemetryDisabled) {
+                        this.checkNotebookCell(e.cell, 'onExecution').catch(noop);
+                    }
+                });
+            }, this)
         );
+        this.disposables.add(onDidChangeTelemetryEnablement((enabled) => (this.isTelemetryDisabled = enabled)));
     }
 
-    public dispose() {
-        disposeAllDisposables(this.disposables);
-        this.pendingChecks.clear();
-    }
-
-    public async activate(): Promise<void> {
-        this.vscNotebook.notebookDocuments.forEach((e) => this.checkNotebookDocument(e, 'onOpenCloseOrSave'));
+    public activate() {
+        workspace.notebookDocuments.forEach((e) => this.checkNotebookDocument(e, 'onOpenCloseOrSave'));
     }
 
     private getDocumentLines(document: TextDocument): string[] {
@@ -130,7 +109,7 @@ export class ImportTracker implements IExtensionSingleActivationService, IDispos
         const currentTimeout = this.pendingChecks.get(file);
         if (currentTimeout) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            clearTimeout(currentTimeout as any);
+            currentTimeout.dispose();
             this.pendingChecks.delete(file);
         }
 
@@ -140,7 +119,8 @@ export class ImportTracker implements IExtensionSingleActivationService, IDispos
             check();
         } else {
             // Wait five seconds to make sure we don't already have this document pending.
-            this.pendingChecks.set(file, setTimeout(check, 5000));
+            const timeout = setTimeout(check, 5000);
+            this.pendingChecks.set(file, new Disposable(() => clearTimeout(timeout)));
         }
     }
 
@@ -155,11 +135,13 @@ export class ImportTracker implements IExtensionSingleActivationService, IDispos
         if (
             !isJupyterNotebook(cell.notebook) ||
             cell.kind !== NotebookCellKind.Code ||
-            cell.document.languageId !== PYTHON_LANGUAGE
+            cell.document.languageId !== PYTHON_LANGUAGE ||
+            this.processedNotebookCells.get(cell) === cell.document.version
         ) {
             return;
         }
         try {
+            this.processedNotebookCells.set(cell, cell.document.version);
             const resourceType = cell.notebook.notebookType === JupyterNotebookView ? 'notebook' : 'interactive';
             await this.sendTelemetryForImports(this.getDocumentLines(cell.document), resourceType, when);
         } catch (ex) {

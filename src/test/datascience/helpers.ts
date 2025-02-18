@@ -6,7 +6,7 @@
 import { assert } from 'chai';
 import * as vscode from 'vscode';
 import { getFilePath } from '../../platform/common/platform/fs-paths';
-import { traceInfo, traceInfoIfCI } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { IPythonApiProvider } from '../../platform/api/types';
 import { IJupyterSettings, Resource } from '../../platform/common/types';
 import { InteractiveWindow } from '../../interactive-window/interactiveWindow';
@@ -20,21 +20,21 @@ import {
 import { IDataScienceCodeLensProvider } from '../../interactive-window/editor-integration/types';
 import { IInteractiveWindowProvider, IInteractiveWindow } from '../../interactive-window/types';
 import { Commands } from '../../platform/common/constants';
-import { noop, sleep } from '../core';
+import { sleep } from '../core';
 import { arePathsSame } from '../../platform/common/platform/fileUtils';
 import { IS_REMOTE_NATIVE_TEST } from '../constants';
 import { isWeb } from '../../platform/common/utils/misc';
-import { IControllerSelection } from '../../notebooks/controllers/types';
+import { IControllerRegistration } from '../../notebooks/controllers/types';
 import { Matcher } from 'ts-mockito/lib/matcher/type/Matcher';
 import { IInterpreterService } from '../../platform/interpreter/contracts';
 import { isEqual } from '../../platform/vscode-path/resources';
-import { IWorkspaceService } from '../../platform/common/application/types';
+import { instance } from 'ts-mockito';
 
 export async function openNotebook(ipynbFile: vscode.Uri) {
-    traceInfo(`Opening notebook ${getFilePath(ipynbFile)}`);
+    logger.info(`Opening notebook ${getFilePath(ipynbFile)}`);
     const notebook = await vscode.workspace.openNotebookDocument(ipynbFile);
     const editor = await vscode.window.showNotebookDocument(notebook);
-    traceInfo(`Opened notebook ${getFilePath(ipynbFile)}`);
+    logger.info(`Opened notebook ${getFilePath(ipynbFile)}`);
     return { notebook, editor };
 }
 
@@ -49,53 +49,24 @@ export function defaultDataScienceSettings(): IJupyterSettings {
             optOutFrom: [],
             optInto: []
         },
-        allowImportFromNotebook: true,
         jupyterLaunchTimeout: 10,
         jupyterLaunchRetries: 3,
         // eslint-disable-next-line no-template-curly-in-string
         notebookFileRoot: '${fileDirname}',
         useDefaultConfigForJupyter: true,
         jupyterInterruptTimeout: 10000,
-        searchForJupyter: true,
-        showCellInputCode: true,
-        allowInput: true,
-        maxOutputSize: 400,
-        enableScrollingForCellOutputs: true,
         errorBackgroundColor: '#FFFFFF',
         sendSelectionToInteractiveWindow: false,
         variableExplorerExclude: 'module;function;builtin_function_or_method',
         codeRegularExpression: '^(#\\s*%%|#\\s*\\<codecell\\>|#\\s*In\\[\\d*?\\]|#\\s*In\\[ \\])',
         markdownRegularExpression: '^(#\\s*%%\\s*\\[markdown\\]|#\\s*\\<markdowncell\\>)',
-        generateSVGPlots: false,
         runStartupCommands: '',
         debugJustMyCode: true,
-        variableQueries: [],
         jupyterCommandLineArguments: [],
         widgetScriptSources: [],
         interactiveWindowMode: 'single'
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
-}
-
-export function takeSnapshot() {
-    // If you're investigating memory leaks in the tests, using the node-memwatch
-    // code below can be helpful. It will at least write out what objects are taking up the most
-    // memory.
-    // Alternatively, using the test:functional:memleak task and sticking breakpoints here and in
-    // writeDiffSnapshot can be used as convenient locations to create heap snapshots and diff them.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    //const memwatch = require('@raghb1/node-memwatch');
-    return {}; //new memwatch.HeapDiff();
-}
-
-//let snapshotCounter = 1;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function writeDiffSnapshot(_snapshot: any, _prefix: string) {
-    noop(); // Stick breakpoint here when generating heap snapshots
-    // const diff = snapshot.end();
-    // const file = path.join(EXTENSION_ROOT_DIR, 'tmp', `SD-${snapshotCounter}-${prefix}.json`);
-    // snapshotCounter += 1;
-    // fs.writeFile(file, JSON.stringify(diff), { encoding: 'utf-8' }).ignoreErrors();
 }
 
 export async function createStandaloneInteractiveWindow(interactiveWindowProvider: InteractiveWindowProvider) {
@@ -111,8 +82,16 @@ export async function insertIntoInputEditor(source: string, interactiveWindow?: 
         inputBox = vscode.window.visibleTextEditors.find(
             (e) => e.document.uri.path === interactiveWindow.inputUri.path
         );
+        if (!inputBox) {
+            logger.error(
+                `couldn't find input box ${interactiveWindow.inputUri.path} in visible text editors ${JSON.stringify(
+                    vscode.window.visibleTextEditors.map((e) => e.document.uri.path)
+                )}`
+            );
+        }
     }
     if (!inputBox) {
+        await vscode.commands.executeCommand('interactive.input.focus');
         inputBox = vscode.window.activeTextEditor;
     }
 
@@ -130,10 +109,10 @@ export async function setActiveInterpreter(
     interpreter: vscode.Uri | undefined
 ) {
     if (interpreter) {
-        const [pythonApi, api] = await Promise.all([apiProvider.getNewApi(), initialize()]);
+        const [pythonApi] = await Promise.all([apiProvider.getNewApi(), initialize()]);
         // if we have one workspace, then use the Uri of the workspace folder.
-        const workspace = api.serviceContainer.get<IWorkspaceService>(IWorkspaceService);
-        resource = workspace.workspaceFolders?.length === 1 ? workspace.workspaceFolders[0].uri : resource;
+        resource =
+            vscode.workspace.workspaceFolders?.length === 1 ? vscode.workspace.workspaceFolders[0].uri : resource;
         await pythonApi?.environments.updateActiveEnvironmentPath(getFilePath(interpreter), resource);
     }
 }
@@ -205,10 +184,10 @@ export async function runNewPythonFile(
 }
 
 export async function runCurrentFile(interactiveWindowProvider: IInteractiveWindowProvider, file: vscode.TextDocument) {
-    await vscode.window.showTextDocument(file);
+    await vscode.window.showTextDocument(file, vscode.ViewColumn.One);
     const activeInteractiveWindow = (await interactiveWindowProvider.getOrCreate(file.uri)) as InteractiveWindow;
     await waitForInteractiveWindow(activeInteractiveWindow);
-    await vscode.commands.executeCommand(Commands.RunFileInInteractiveWindows, file.uri);
+    await vscode.commands.executeCommand(Commands.RunAllCells, file.uri);
     return activeInteractiveWindow;
 }
 
@@ -236,11 +215,19 @@ export async function waitForInteractiveWindow(
             notebookDocument = vscode.workspace.notebookDocuments.find(
                 (doc) => doc.uri.toString() === interactiveWindow?.notebookUri?.toString()
             );
-            return notebookDocument !== undefined;
+            let inputBox = vscode.window.visibleTextEditors.find(
+                (e) => e.document.uri.path === interactiveWindow?.inputUri?.path
+            );
+            logger.debug(
+                `Waiting for Interactive Window '${interactiveWindow.notebookUri?.toString()}',`,
+                `found notebook '${notebookDocument?.uri.toString()}' and input '${inputBox?.document.uri.toString()}'`
+            );
+            return !!notebookDocument && !!inputBox;
         },
         defaultNotebookTestTimeout,
         'Interactive window notebook document not found'
     );
+
     return notebookDocument!;
 }
 
@@ -278,7 +265,7 @@ export async function waitForLastCellToComplete(
     } else {
         await waitForExecutionCompletedSuccessfully(codeCell!);
     }
-    traceInfoIfCI(`finished waiting for last cell to complete of ${codeCells.length} cells`);
+    logger.ci(`finished waiting for last cell to complete of ${codeCells.length} cells`);
     return codeCell!;
 }
 
@@ -314,7 +301,7 @@ export async function waitForCodeLenses(document: vscode.Uri, command: string) {
         `Code lens with command ${command} not found`
     );
 
-    traceInfoIfCI(`Found code lenses with command ${command}`);
+    logger.ci(`Found code lenses with command ${command}`);
     return codeLenses;
 }
 
@@ -324,7 +311,7 @@ export async function verifySelectedControllerIsRemoteForRemoteTests(notebook?: 
     }
     notebook = notebook || vscode.window.activeNotebookEditor!.notebook;
     const api = await initialize();
-    const controller = api.serviceContainer.get<IControllerSelection>(IControllerSelection).getSelected(notebook);
+    const controller = api.serviceContainer.get<IControllerRegistration>(IControllerRegistration).getSelected(notebook);
     if (!controller) {
         return;
     }
@@ -348,4 +335,11 @@ export function uriEquals(expected: string | vscode.Uri) {
         }
     }
     return new UriMatcher(typeof expected === 'string' ? vscode.Uri.file(expected) : expected) as unknown as vscode.Uri;
+}
+
+export function resolvableInstance<T>(mockedValue: T): T {
+    const instanceValue = instance<T>(mockedValue);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (instanceValue as any).then = undefined;
+    return instanceValue;
 }

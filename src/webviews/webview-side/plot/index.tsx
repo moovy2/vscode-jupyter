@@ -1,12 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-// This must be on top, do not change. Required by webpack.
-import '../common/main';
-// This must be on top, do not change. Required by webpack.
-
 // eslint-disable-next-line import/order
 import '../common/index.css';
 

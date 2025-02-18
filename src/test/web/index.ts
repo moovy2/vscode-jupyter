@@ -17,7 +17,7 @@ setTestSettings({
 // E.g. when extension activates, the isCI would have been set and necessary loggers setup & the like.
 import * as extension from '../../extension.web';
 import * as vscode from 'vscode';
-import type { IExtensionApi } from '../../standalone/api/api';
+import type { IExtensionApi } from '../../standalone/api';
 import type { IExtensionContext } from '../../platform/common/types';
 import { IExtensionTestApi } from '../common';
 import { JVSC_EXTENSION_ID } from '../../platform/common/constants';
@@ -25,6 +25,19 @@ const CustomReporter = require('./customReporter');
 import { sleep } from '../../platform/common/utils/async';
 
 let activatedResponse: undefined | IExtensionApi;
+
+declare var VSC_JUPYTER_CI_TEST_GREP: '';
+function getMochaTestGrep() {
+    try {
+        if (typeof VSC_JUPYTER_CI_TEST_GREP === 'string') {
+            console.log('Grep for testing is ', VSC_JUPYTER_CI_TEST_GREP);
+            return VSC_JUPYTER_CI_TEST_GREP;
+        }
+        return '';
+    } catch {
+        return '';
+    }
+}
 
 // Basically this is the entry point for the extension.
 export async function activate(context: IExtensionContext): Promise<IExtensionApi> {
@@ -36,10 +49,14 @@ export async function activate(context: IExtensionContext): Promise<IExtensionAp
         require('mocha/mocha');
 
         return new Promise<void>(async (resolve, reject) => {
+            // Check for a grep setting. Might be running a subset of the tests
+            const grep = getMochaTestGrep();
+            console.log('Grep for Mocha testing is ', grep);
             mocha.setup({
                 ui: 'tdd',
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                reporter: CustomReporter as any
+                reporter: CustomReporter as any,
+                grep
             });
 
             // bundles all files in the current directory matching `*.web.test` & `*.common.test`

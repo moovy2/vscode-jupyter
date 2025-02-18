@@ -1,9 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import '../common/extensions';
-
 import {
     Event,
     EventEmitter,
@@ -13,12 +10,11 @@ import {
     WebviewView as vscodeWebviewView
 } from 'vscode';
 import { IWebview, IWebviewOptions, WebviewMessage } from '../common/application/types';
-import { traceError } from '../logging';
+import { logger } from '../logging';
 import { Identifiers } from '../common/constants';
 import { IFileSystem } from '../common/platform/types';
-import { IDisposableRegistry, IExtensionContext } from '../common/types';
+import { IDisposableRegistry } from '../common/types';
 import * as localize from '../common/utils/localize';
-import { joinPath } from '../vscode-path/resources';
 
 // Wrapper over a vscode webview. To be used with either WebviewPanel or WebviewView
 export abstract class Webview implements IWebview {
@@ -32,7 +28,6 @@ export abstract class Webview implements IWebview {
     constructor(
         protected fs: IFileSystem,
         protected disposableRegistry: IDisposableRegistry,
-        private readonly context: IExtensionContext,
         protected options: IWebviewOptions,
         additionalRootPaths: Uri[] = []
     ) {
@@ -80,19 +75,6 @@ export abstract class Webview implements IWebview {
         const uris = this.options.scripts.map((script) => this.webviewHost!.webview!.asWebviewUri(script));
 
         const rootPath = this.webviewHost.webview.asWebviewUri(this.options.rootPath).toString();
-        const fontAwesomePath = this.webviewHost.webview
-            .asWebviewUri(
-                joinPath(
-                    this.context.extensionUri,
-                    'out',
-                    'fontAwesome',
-                    'node_modules',
-                    'font-awesome',
-                    'css',
-                    'font-awesome.min.css'
-                )
-            )
-            .toString();
 
         // Change to `true` to force on Test middleware for our react code
         const forceTestMiddleware = 'false';
@@ -104,13 +86,12 @@ export abstract class Webview implements IWebview {
                 <meta http-equiv="Content-Security-Policy" content="img-src 'self' data: https: http: blob: ${
                     this.webviewHost.webview.cspSource
                 }; default-src 'unsafe-inline' 'unsafe-eval' data: https: http: blob: ${
-            this.webviewHost.webview.cspSource
-        };">
+                    this.webviewHost.webview.cspSource
+                };">
                 <meta name="theme-color" content="#000000">
                 <meta name="theme" content="${Identifiers.GeneratedThemeName}"/>
                 <title>VS Code Python React UI</title>
                 <base href="${uriBase}${uriBase.endsWith('/') ? '' : '/'}"/>
-                <link rel="stylesheet" href="${fontAwesomePath}">
                 </head>
             <body>
                 <noscript>You need to enable JavaScript to run this app.</noscript>
@@ -147,14 +128,15 @@ export abstract class Webview implements IWebview {
                     this.postLoad(this.webviewHost);
                 } else {
                     // Indicate that we can't load the file path
-                    const badPanelString = localize.DataScience.badWebPanelFormatString();
-                    this.webviewHost.webview.html = badPanelString.format(this.options.scripts.join(', '));
+                    this.webviewHost.webview.html = localize.DataScience.badWebPanelFormatString(
+                        this.options.scripts.join(', ')
+                    );
                 }
             }
         } catch (error) {
             // If our web panel failes to load, report that out so whatever
             // is hosting the panel can clean up
-            traceError(`Error Loading WebviewPanel: ${error}`);
+            logger.error(`Error Loading WebviewPanel: ${error}`);
             this.loadFailedEmitter.fire();
         }
     }

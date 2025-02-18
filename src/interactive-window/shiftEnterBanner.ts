@@ -1,13 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { inject, injectable } from 'inversify';
-import { ConfigurationTarget } from 'vscode';
-import { IApplicationShell } from '../platform/common/application/types';
+import { ConfigurationTarget, window } from 'vscode';
 import { Telemetry } from '../platform/common/constants';
-import '../platform/common/extensions';
 import { IJupyterExtensionBanner, IPersistentStateFactory, IConfigurationService } from '../platform/common/types';
 import * as localize from '../platform/common/utils/localize';
 import { sendTelemetryEvent, captureUsageTelemetry } from '../telemetry';
@@ -28,11 +24,10 @@ enum InteractiveShiftEnterLabelIndex {
 export class InteractiveShiftEnterBanner implements IJupyterExtensionBanner {
     private initialized?: boolean;
     private disabledInCurrentSession: boolean = false;
-    private bannerMessage: string = localize.InteractiveShiftEnterBanner.bannerMessage();
-    private bannerLabels: string[] = [localize.Common.bannerLabelYes(), localize.Common.bannerLabelNo()];
+    private bannerMessage: string = localize.InteractiveShiftEnterBanner.bannerMessage;
+    private bannerLabels: string[] = [localize.Common.bannerLabelYes, localize.Common.bannerLabelNo];
 
     constructor(
-        @inject(IApplicationShell) private appShell: IApplicationShell,
         @inject(IPersistentStateFactory) private persistentState: IPersistentStateFactory,
         @inject(IConfigurationService) private configuration: IConfigurationService
     ) {
@@ -68,7 +63,7 @@ export class InteractiveShiftEnterBanner implements IJupyterExtensionBanner {
         }
 
         sendTelemetryEvent(Telemetry.ShiftEnterBannerShown);
-        const response = await this.appShell.showInformationMessage(this.bannerMessage, ...this.bannerLabels);
+        const response = await window.showInformationMessage(this.bannerMessage, ...this.bannerLabels);
         switch (response) {
             case this.bannerLabels[InteractiveShiftEnterLabelIndex.Yes]: {
                 await this.enableInteractiveShiftEnter();
@@ -95,7 +90,7 @@ export class InteractiveShiftEnterBanner implements IJupyterExtensionBanner {
     @captureUsageTelemetry(Telemetry.DisableInteractiveShiftEnter)
     public async disableInteractiveShiftEnter(): Promise<void> {
         await this.configuration.updateSetting(
-            'sendSelectionToInteractiveWindow',
+            'interactiveWindow.textEditor.executeSelection',
             false,
             undefined,
             ConfigurationTarget.Global
@@ -106,7 +101,7 @@ export class InteractiveShiftEnterBanner implements IJupyterExtensionBanner {
     @captureUsageTelemetry(Telemetry.EnableInteractiveShiftEnter)
     public async enableInteractiveShiftEnter(): Promise<void> {
         await this.configuration.updateSetting(
-            'sendSelectionToInteractiveWindow',
+            'interactiveWindow.textEditor.executeSelection',
             true,
             undefined,
             ConfigurationTarget.Global

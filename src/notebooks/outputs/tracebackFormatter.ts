@@ -1,13 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { injectable } from 'inversify';
+import { inject, injectable } from 'inversify';
 import { NotebookCell } from 'vscode';
 import { ITracebackFormatter } from '../../kernels/types';
 import { JupyterNotebookView } from '../../platform/common/constants';
 import { getFilePath } from '../../platform/common/platform/fs-paths';
 import { DataScience } from '../../platform/common/utils/localize';
-import { traceInfoIfCI } from '../../platform/logging';
+import { logger } from '../../platform/logging';
+import { IConfigurationService } from '../../platform/common/types';
 const LineNumberMatchRegex = /(;32m[ ->]*?)(\d+)(.*)/g;
 
 /**
@@ -15,6 +16,8 @@ const LineNumberMatchRegex = /(;32m[ ->]*?)(\d+)(.*)/g;
  */
 @injectable()
 export class NotebookTracebackFormatter implements ITracebackFormatter {
+    constructor(@inject(IConfigurationService) private configurationService: IConfigurationService) {}
+
     public format(cell: NotebookCell, traceback: string[]): string[] {
         if (cell.notebook.notebookType !== JupyterNotebookView) {
             return traceback;
@@ -23,7 +26,10 @@ export class NotebookTracebackFormatter implements ITracebackFormatter {
         return traceback.map((traceFrame) => this.modifyTracebackFrameIPython(cell, traceFrame));
     }
     private modifyTracebackFrameIPython(cell: NotebookCell, traceFrame: string): string {
-        if (/^[Cell|Input|File].*?\n.*/.test(traceFrame)) {
+        const settings = this.configurationService.getSettings(cell.document.uri);
+        const formatStackTraces = settings?.formatStackTraces ?? false;
+
+        if (formatStackTraces && /^[Cell|Input|File].*?\n.*/.test(traceFrame)) {
             return this.modifyTracebackFrameIPython8(cell, traceFrame);
         } else {
             return traceFrame;
@@ -47,26 +53,30 @@ export class NotebookTracebackFormatter implements ITracebackFormatter {
             return `${prefix}${num}${suffix}\n`;
         });
 
-        traceInfoIfCI(`Trace frame to match: ${traceFrame}`);
+        logger.ci(`Trace frame to match: ${traceFrame}`);
 
-        const inputMatch = /^Input.*?\[.*32mIn\s+\[(\d+).*?0;36m(.*?)\n.*/.exec(traceFrame);
-        if (inputMatch && inputMatch.length > 1) {
+        const tracebackLinkify = (traceFrame: string, line: string) => {
             // We have a match, replace source lines first
             const afterLineReplace = traceFrame.replace(LineNumberMatchRegex, (_s, prefix, num, suffix) => {
                 const n = parseInt(num, 10);
                 return `${prefix}<a href='${cell.document.uri.toString()}?line=${n - 1}'>${n}</a>${suffix}`;
             });
 
-            // Then replace the input line with our uri for this cell
-            const cellAt = DataScience.cellAtFormat().format(
-                getFilePath(cell.document.uri),
-                (cell.index + 1).toString()
-            );
-            return afterLineReplace.replace(
-                /.*?\n/,
-                `\u001b[1;32m${cellAt}\u001b[0m in \u001b[0;36m${inputMatch[2]}\n`
-            );
+            // Then replace the input line with our uri for this cell: '<cell line: 2>[0;34m()[0m\n'
+            const cellAt = DataScience.cellAtFormat(getFilePath(cell.document.uri), cell.index + 1);
+            return afterLineReplace.replace(/.*?\n/, `\u001b[1;32m${cellAt}\u001b[0m line \u001b[0;36m${line}\n`);
+        };
+
+        const inputMatch = /^Input.*?\[.*32mIn\s+\[(\d+).*?0;36m(.*?)\n.*/.exec(traceFrame);
+        if (inputMatch && inputMatch.length > 1) {
+            return tracebackLinkify(traceFrame, inputMatch[2]);
         }
+
+        const cellMatch = /Cell.*?\[.*32mIn\s*\[(\d+)\]\,\s+line\s+([(\d+)])(.*?)\n.*/gm.exec(traceFrame);
+        if (cellMatch && cellMatch.length > 1) {
+            return tracebackLinkify(traceFrame, cellMatch[2]);
+        }
+
         return traceFrame;
     }
 }

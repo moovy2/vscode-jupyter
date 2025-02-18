@@ -1,12 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { IExtensionSingleActivationService, IExtensionSyncActivationService } from '../../platform/activation/types';
+import { IExtensionSyncActivationService } from '../../platform/activation/types';
 import { IServiceManager } from '../../platform/ioc/types';
 import { DataViewer } from './dataviewer/dataViewer';
 import { DataViewerCommandRegistry } from './dataviewer/dataViewerCommandRegistry';
+import { DataViewerDelegator } from './dataviewer/dataViewerDelegator';
 import { DataViewerDependencyService } from './dataviewer/dataViewerDependencyService.node';
 import { DataViewerFactory } from './dataviewer/dataViewerFactory';
 import { JupyterVariableDataProvider } from './dataviewer/jupyterVariableDataProvider';
@@ -18,6 +17,7 @@ import {
     IJupyterVariableDataProvider,
     IJupyterVariableDataProviderFactory
 } from './dataviewer/types';
+import { IPyWidgetRendererComms } from './ipywidgets/rendererComms';
 import { PlotViewer } from './plotting/plotViewer.node';
 import { PlotViewerProvider } from './plotting/plotViewerProvider';
 import { IPlotViewer, IPlotViewerProvider } from './plotting/types';
@@ -31,7 +31,7 @@ import { VariableViewActivationService } from './variablesView/variableViewActiv
 import { VariableViewProvider } from './variablesView/variableViewProvider';
 
 export function registerTypes(serviceManager: IServiceManager) {
-    serviceManager.addSingleton<IExtensionSingleActivationService>(
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
         IExtensionSyncActivationService,
         RendererCommunication
     );
@@ -43,10 +43,11 @@ export function registerTypes(serviceManager: IServiceManager) {
         IDataViewerDependencyService,
         DataViewerDependencyService
     );
-    serviceManager.addSingleton<IExtensionSingleActivationService>(
-        IExtensionSingleActivationService,
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
         DataViewerCommandRegistry
     );
+    serviceManager.addSingleton<DataViewerDelegator>(DataViewerDelegator, DataViewerDelegator);
 
     // Plot Viewer
     serviceManager.add<IPlotViewer>(IPlotViewer, PlotViewer);
@@ -56,9 +57,13 @@ export function registerTypes(serviceManager: IServiceManager) {
 
     // Variable View
     serviceManager.addSingleton<INotebookWatcher>(INotebookWatcher, NotebookWatcher);
-    serviceManager.addSingleton<IExtensionSingleActivationService>(
-        IExtensionSingleActivationService,
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
         VariableViewActivationService
+    );
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
+        IPyWidgetRendererComms
     );
     serviceManager.addSingleton<IVariableViewProvider>(IVariableViewProvider, VariableViewProvider);
     serviceManager.add<IJupyterVariableDataProvider>(IJupyterVariableDataProvider, JupyterVariableDataProvider);

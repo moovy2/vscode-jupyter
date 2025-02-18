@@ -3,33 +3,30 @@
 
 export const PYTHON_LANGUAGE = 'python';
 export const MARKDOWN_LANGUAGE = 'markdown';
-export const JUPYTER_LANGUAGE = 'jupyter';
-
 export const NotebookCellScheme = 'vscode-notebook-cell';
 export const PYTHON_UNTITLED = { scheme: 'untitled', language: PYTHON_LANGUAGE };
 export const PYTHON_FILE = { scheme: 'file', language: PYTHON_LANGUAGE };
 export const PYTHON_FILE_ANY_SCHEME = { language: PYTHON_LANGUAGE };
 export const PYTHON_CELL = { scheme: NotebookCellScheme, language: PYTHON_LANGUAGE };
 export const PYTHON = [PYTHON_UNTITLED, PYTHON_FILE, PYTHON_CELL];
-export const PYTHON_ALLFILES = [{ language: PYTHON_LANGUAGE }];
-export const GITHUB_ISSUE_MARKDOWN_FILE = [{ language: MARKDOWN_LANGUAGE, scheme: 'untitled', pattern: '**/issue.md' }];
-
 export const InteractiveInputScheme = 'vscode-interactive-input';
-export const InteractiveScheme = 'vscode-interactive';
 export const JupyterNotebookView = 'jupyter-notebook';
 export const InteractiveWindowView = 'interactive';
 
 export const NOTEBOOK_SELECTOR = [
     { language: PYTHON_LANGUAGE, notebookType: JupyterNotebookView },
+    { language: PYTHON_LANGUAGE, notebookType: InteractiveWindowView },
     { scheme: InteractiveInputScheme, language: PYTHON_LANGUAGE },
-    { scheme: InteractiveScheme, language: PYTHON_LANGUAGE },
     { scheme: NotebookCellScheme, language: PYTHON_LANGUAGE }
 ];
 
+export const CodespaceExtensionId = 'GitHub.codespaces';
 export const JVSC_EXTENSION_ID = 'ms-toolsai.jupyter';
+export const DATA_WRANGLER_EXTENSION_ID = 'ms-toolsai.datawrangler';
+export const PROPOSED_API_ALLOWED_PUBLISHERS = ['donjayamanne'];
+export const POWER_TOYS_EXTENSION_ID = 'ms-toolsai.vscode-jupyter-powertoys';
+export const JUPYTER_HUB_EXTENSION_ID = 'ms-toolsai.jupyter-hub';
 export const AppinsightsKey = '0c6ae279ed8443289764825290e4f9e2-1a736e7c-1324-4338-be46-fc2a58ae4d14-7255';
-
-export const DEFAULT_INTERPRETER_SETTING = 'python';
 
 export const STANDARD_OUTPUT_CHANNEL = 'STANDARD_OUTPUT_CHANNEL';
 
@@ -41,17 +38,12 @@ export namespace HelpLinks {
 }
 
 export namespace Settings {
-    export const JupyterServerLocalLaunch = 'local';
-    export const JupyterServerRemoteLaunch = 'remote';
-    export const JupyterServerUriList = 'jupyter.jupyterServer.uriList';
-    export const JupyterServerRemoteLaunchUriListKey = 'remote-uri-list';
-    export const JupyterServerRemoteLaunchUriSeparator = '\r';
     export const JupyterServerRemoteLaunchNameSeparator = '\n';
-    export const JupyterServerRemoteLaunchUriEqualsDisplayName = 'same';
     export const JupyterServerRemoteLaunchService = JVSC_EXTENSION_ID;
     export const JupyterServerUriListMax = 10;
     // If this timeout expires, ignore the completion request sent to Jupyter.
-    export const IntellisenseTimeout = 2000;
+    export var IntellisenseTimeout = 2_000;
+    export const IntellisenseResolveTimeout = 5_000;
 }
 
 export let isCI = false;
@@ -83,7 +75,6 @@ export function setUnitTestExecution(enabled: boolean) {
 
 export namespace Identifiers {
     export const GeneratedThemeName = 'ipython-theme'; // This needs to be all lower class and a valid class name.
-    export const RawPurpose = 'raw';
     export const MatplotLibDefaultParams = '_VSCode_defaultMatplotlib_Params';
     export const MatplotLibFigureFormats = '_VSCode_matplotLib_FigureFormats';
     export const DefaultCodeCellMarker = '# %%';
@@ -97,38 +88,24 @@ export namespace Identifiers {
     export const REMOTE_URI = 'https://remote/';
     export const REMOTE_URI_ID_PARAM = 'id';
     export const REMOTE_URI_HANDLE_PARAM = 'uriHandle';
+    export const REMOTE_URI_EXTENSION_ID_PARAM = 'extensionId';
 }
 
 export namespace CodeSnippets {
-    export const ChangeDirectory = [
-        '{0}',
-        '{1}',
-        'import os',
-        'try:',
-        "\tos.chdir(os.path.join(os.getcwd(), '{2}'))",
-        '\tprint(os.getcwd())',
-        'except:',
-        '\tpass',
-        ''
-    ];
-    export const ChangeDirectoryCommentIdentifier = '# ms-toolsai.jupyter added'; // Not translated so can compare.
     export const ImportIPython = '{0}\nfrom IPython import get_ipython\n\n{1}';
     export const MatplotLibInit = `import matplotlib\n%matplotlib inline\n${Identifiers.MatplotLibDefaultParams} = dict(matplotlib.rcParams)\n`;
-    export const AppendSVGFigureFormat = `import matplotlib_inline.backend_inline\n${Identifiers.MatplotLibFigureFormats} = matplotlib_inline.backend_inline.InlineBackend.instance().figure_formats\n${Identifiers.MatplotLibFigureFormats}.add('svg')\nmatplotlib_inline.backend_inline.set_matplotlib_formats(*${Identifiers.MatplotLibFigureFormats})`;
-    export const UpdateCWDAndPath =
-        'import os\nimport sys\n%cd "{0}"\nif os.getcwd() not in sys.path:\n    sys.path.insert(0, os.getcwd())';
     export const DisableJedi = '%config Completer.use_jedi = False';
 }
 
 // Identifier for the output panel that will display the output from the Jupyter Server.
 export const JUPYTER_OUTPUT_CHANNEL = 'JUPYTER_OUTPUT_CHANNEL';
-export const JupyterDaemonModule = 'vscode_datascience_helpers.jupyter_daemon';
 
 export const DefaultTheme = 'Default Light+';
 
 // Python Module to be used when instantiating the Python Daemon.
 
 export const PythonExtension = 'ms-python.python';
+export const RendererExtension = 'ms-toolsai.jupyter-renderers';
 export const PylanceExtension = 'ms-python.vscode-pylance';
 
 export const LanguagesSupportedByPythonkernel = [
@@ -145,18 +122,9 @@ export const LanguagesSupportedByPythonkernel = [
     'ruby', // %%ruby
     'sql', // %%sql
     'perl', // %%perl
+    'qsharp', // %%qsharp
     'raw' // raw cells (no formatting)
 ];
-
-// List of 'language' names that we know about. All should be lower case as that's how we compare.
-export const KnownKernelLanguageAliases = new Map<string, string>([
-    ['qsharp', 'q#'],
-    ['csharp', 'c#'],
-    ['fsharp', 'f#'],
-    ['c++11', 'c++'],
-    ['c++12', 'c++'],
-    ['c++14', 'c++']
-]);
 export const jupyterLanguageToMonacoLanguageMapping = new Map([
     ['bash', 'shellscript'],
     ['c#', 'csharp'],
@@ -211,17 +179,13 @@ export namespace Commands {
     export const CreateNewInteractive = 'jupyter.createnewinteractive';
     export const ImportNotebook = 'jupyter.importnotebook';
     export const ImportNotebookFile = 'jupyter.importnotebookfile';
-    export const SelectJupyterURI = 'jupyter.selectjupyteruri';
-    export const SelectNativeJupyterUriFromToolBar = 'jupyter.selectNativeJupyterUriFromToolBar';
-    export const SelectJupyterCommandLine = 'jupyter.selectjupytercommandline';
     export const ExportFileAsNotebook = 'jupyter.exportfileasnotebook';
     export const ExportFileAndOutputAsNotebook = 'jupyter.exportfileandoutputasnotebook';
     export const InterruptKernel = 'jupyter.interruptkernel';
     export const RestartKernel = 'jupyter.restartkernel';
-    export const NotebookEditorUndoCells = 'jupyter.notebookeditor.undocells';
-    export const NotebookEditorRedoCells = 'jupyter.notebookeditor.redocells';
+    export const RestartKernelAndRunAllCells = 'jupyter.restartkernelandrunallcells';
+    export const RestartKernelAndRunUpToSelectedCell = 'jupyter.restartkernelandrunuptoselectedcell';
     export const NotebookEditorRemoveAllCells = 'jupyter.notebookeditor.removeallcells';
-    export const NotebookEditorRestartKernel = 'jupyter.notebookeditor.restartkernel';
     export const NotebookEditorRunAllCells = 'jupyter.notebookeditor.runallcells';
     export const NotebookEditorRunSelectedCell = 'jupyter.notebookeditor.runselectedcell';
     export const NotebookEditorAddCellBelow = 'jupyter.notebookeditor.addcellbelow';
@@ -262,11 +226,8 @@ export namespace Commands {
     export const NativeNotebookExport = 'jupyter.notebookeditor.export';
     export const LatestExtension = 'jupyter.latestExtension';
     export const EnableLoadingWidgetsFrom3rdPartySource = 'jupyter.enableLoadingWidgetScriptsFromThirdPartySource';
-    export const NotebookEditorExpandAllCells = 'jupyter.notebookeditor.expandallcells';
-    export const NotebookEditorCollapseAllCells = 'jupyter.notebookeditor.collapseallcells';
-    export const EnableDebugLogging = 'jupyter.enableDebugLogging';
-    export const ResetLoggingLevel = 'jupyter.resetLoggingLevel';
     export const ShowDataViewer = 'jupyter.showDataViewer';
+    export const ShowJupyterDataViewer = 'jupyter.showJupyterDataViewer';
     export const RefreshDataViewer = 'jupyter.refreshDataViewer';
     export const ClearSavedJupyterUris = 'jupyter.clearSavedJupyterUris';
     export const OpenVariableView = 'jupyter.openVariableView';
@@ -284,10 +245,7 @@ export namespace Commands {
     export const ReplayPylanceLogStep = 'jupyter.replayPylanceLogStep';
     export const InstallPythonExtensionViaKernelPicker = 'jupyter.installPythonExtensionViaKernelPicker';
     export const InstallPythonViaKernelPicker = 'jupyter.installPythonViaKernelPicker';
-    export const SwitchToLocalKernels = 'jupyter.switchToLocalKernels';
-    export const SwitchToRemoteKernels = 'jupyter.switchToRemoteKernels';
-    export const SwitchToAnotherRemoteKernels = 'jupyter.switchToAnotherRemoteKernels';
-    export const PickDocumentKernelSource = 'jupyter.pickDocumentKernelSource';
+    export const ContinueEditSessionInCodespace = 'jupyter.continueEditSessionInCodespace';
 }
 
 export namespace CodeLensCommands {
@@ -301,13 +259,9 @@ export namespace CodeLensCommands {
 
 export namespace EditorContexts {
     export const HasCodeCells = 'jupyter.hascodecells';
-    export const HaveInteractiveCells = 'jupyter.haveinteractivecells';
-    export const HaveRedoableCells = 'jupyter.haveredoablecells';
-    export const HaveInteractive = 'jupyter.haveinteractive';
     export const IsInteractiveActive = 'jupyter.isinteractiveactive';
     export const OwnsSelection = 'jupyter.ownsSelection';
     export const HaveNativeCells = 'jupyter.havenativecells';
-    export const HaveNativeRedoableCells = 'jupyter.havenativeredoablecells';
     export const HaveNative = 'jupyter.havenative';
     export const IsNativeActive = 'jupyter.isnativeactive';
     export const IsInteractiveOrNativeActive = 'jupyter.isinteractiveornativeactive';
@@ -327,21 +281,14 @@ export namespace EditorContexts {
     export const HasNativeNotebookOrInteractiveWindowOpen = 'jupyter.hasNativeNotebookOrInteractiveWindowOpen';
     export const ZmqAvailable = 'jupyter.zmqavailable';
     export const ReplayLogLoaded = 'jupyter.replayLogLoaded';
+    export const KernelSource = 'jupyter.kernelSource';
 }
 
 export namespace RegExpValues {
     export const PythonCellMarker = /^(#\s*%%|#\s*\<codecell\>|#\s*In\[\d*?\]|#\s*In\[ \])/;
     export const PythonMarkdownCellMarker = /^(#\s*%%\s*\[markdown\]|#\s*\<markdowncell\>)/;
-    // This next one has to be a string because uglifyJS isn't handling the groups. We use named-js-regexp to parse it
-    // instead.
     export const UrlPatternRegEx =
         '(?<PREFIX>https?:\\/\\/)((\\(.+\\s+or\\s+(?<IP>.+)\\))|(?<LOCAL>[^\\s]+))(?<REST>:.+)';
-    export interface IUrlPatternGroupType {
-        LOCAL: string | undefined;
-        PREFIX: string | undefined;
-        REST: string | undefined;
-        IP: string | undefined;
-    }
     export const HttpPattern = /https?:\/\//;
     export const ShapeSplitterRegEx = /.*,\s*(\d+).*/;
     export const SvgHeightRegex = /(\<svg.*height=\")(.*?)\"/;
@@ -375,18 +322,6 @@ export enum Telemetry {
     RunToLine = 'DATASCIENCE.RUN_TO_LINE',
     RunFromLine = 'DATASCIENCE.RUN_FROM_LINE',
     /**
-     * Whether auto save feature in VS Code is enabled or not.
-     */
-    CreateNewInteractive = 'DATASCIENCE.CREATE_NEW_INTERACTIVE',
-    SelectJupyterURI = 'DATASCIENCE.SELECT_JUPYTER_URI',
-    EnterJupyterURI = 'DATASCIENCE.ENTER_JUPYTER_URI',
-    SelectLocalJupyterKernel = 'DATASCIENCE.SELECT_LOCAL_JUPYTER_KERNEL',
-    SelectRemoteJupyterKernel = 'DATASCIENCE.SELECT_REMOTE_JUPYTER_KERNEL',
-    SetJupyterURIToLocal = 'DATASCIENCE.SET_JUPYTER_URI_LOCAL',
-    SetJupyterURIToUserSpecified = 'DATASCIENCE.SET_JUPYTER_URI_USER_SPECIFIED',
-    SetJupyterURIUIDisplayed = 'DATASCIENCE.SET_JUPYTER_URI_UI_DISPLAYED',
-    Interrupt = 'DATASCIENCE.INTERRUPT',
-    /**
      * Exporting from the interactive window
      */
     ExportPythonFileInteractive = 'DATASCIENCE.EXPORT_PYTHON_FILE',
@@ -407,15 +342,8 @@ export enum Telemetry {
      * An export to a specific format failed
      */
     ExportNotebookAsFailed = 'DATASCIENCE.EXPORT_NOTEBOOK_AS_FAILED',
-    FailedToCreateNotebookController = 'DATASCIENCE.FAILED_TO_CREATE_CONTROLLER',
-
-    StartJupyter = 'DS_INTERNAL.JUPYTERSTARTUPCOST',
-    ConnectRemoteJupyterViaLocalHost = 'DS_INTERNAL.CONNECTREMOTEJUPYTER_VIA_LOCALHOST',
-    ConnectFailedJupyter = 'DS_INTERNAL.CONNECTFAILEDJUPYTER',
-    ConnectRemoteFailedJupyter = 'DS_INTERNAL.CONNECTREMOTEFAILEDJUPYTER',
-    StartSessionFailedJupyter = 'DS_INTERNAL.START_SESSION_FAILED_JUPYTER',
-    ConnectRemoteSelfCertFailedJupyter = 'DS_INTERNAL.CONNECTREMOTESELFCERTFAILEDJUPYTER',
-    ConnectRemoteExpiredCertFailedJupyter = 'DS_INTERNAL.CONNECTREMOTEEXPIREDCERTFAILEDJUPYTER',
+    ZMQSupport = 'DS_INTERNAL.JUPYTER_ZMQ_SUPPORT',
+    ZMQSupportFailure = 'DS_INTERNAL.JUPYTER_ZMQ_SUPPORT_FAILURE',
     SelfCertsMessageEnabled = 'DATASCIENCE.SELFCERTSMESSAGEENABLED',
     SelfCertsMessageClose = 'DATASCIENCE.SELFCERTSMESSAGECLOSE',
     ShiftEnterBannerShown = 'DS_INTERNAL.SHIFTENTER_BANNER_SHOWN',
@@ -432,60 +360,52 @@ export enum Telemetry {
     PandasTooOld = 'DS_INTERNAL.SHOW_DATA_PANDAS_TOO_OLD',
     PandasOK = 'DS_INTERNAL.SHOW_DATA_PANDAS_OK',
     PandasInstallCanceled = 'DS_INTERNAL.SHOW_DATA_PANDAS_INSTALL_CANCELED',
-    DataScienceSettings = 'DS_INTERNAL.SETTINGS',
     VariableExplorerVariableCount = 'DS_INTERNAL.VARIABLE_EXPLORER_VARIABLE_COUNT',
     AddCellBelow = 'DATASCIENCE.ADD_CELL_BELOW',
     GetPasswordFailure = 'DS_INTERNAL.GET_PASSWORD_FAILURE',
     GetPasswordSuccess = 'DS_INTERNAL.GET_PASSWORD_SUCCESS',
+    CheckPasswordJupyterHub = 'DS_INTERNAL.JUPYTER_HUB_PASSWORD',
     OpenPlotViewer = 'DATASCIENCE.OPEN_PLOT_VIEWER',
     DebugCurrentCell = 'DATASCIENCE.DEBUG_CURRENT_CELL',
     CodeLensAverageAcquisitionTime = 'DS_INTERNAL.CODE_LENS_ACQ_TIME',
     DocumentWithCodeCells = 'DS_INTERNAL.DOCUMENT_WITH_CODE_CELLS',
-    /**
-     * Telemetry sent when user selects an interpreter to be used for starting of Jupyter server.
-     */
-    SelectJupyterInterpreter = 'DS_INTERNAL.SELECT_JUPYTER_INTERPRETER',
-    /**
-     * User used command to select an intrepreter for the jupyter server.
-     */
-    SelectJupyterInterpreterCommand = 'DATASCIENCE.SELECT_JUPYTER_INTERPRETER_Command',
-    NumberOfSavedRemoteKernelIds = 'DS_INTERNAL.NUMBER_OF_REMOTE_KERNEL_IDS_SAVED',
-    WaitForIdleJupyter = 'DS_INTERNAL.WAIT_FOR_IDLE_JUPYTER',
     PerceivedJupyterStartupNotebook = 'DS_INTERNAL.PERCEIVED_JUPYTER_STARTUP_NOTEBOOK',
     GetActivatedEnvironmentVariables = 'DS_INTERNAL.GET_ACTIVATED_ENV_VARIABLES',
-    WebviewStartup = 'DS_INTERNAL.WEBVIEW_STARTUP',
     VariableExplorerFetchTime = 'DS_INTERNAL.VARIABLE_EXPLORER_FETCH_TIME',
-    FailedToUpdateKernelSpec = 'DS_INTERNAL.FAILED_TO_UPDATE_JUPYTER_KERNEL_SPEC',
+    KernelSpec = 'DS_INTERNAL.JUPYTER_KERNEL_SPEC',
     CellOutputMimeType = 'DS_INTERNAL.CELL_OUTPUT_MIME_TYPE',
+    JupyterApiUsage = 'DATASCIENCE.JUPYTER_API_USAGE',
+    KernelCodeCompletion = 'DATASCIENCE.JUPYTER_KERNEL_CODE_COMPLETION',
+    KernelCodeCompletionCannotResolve = 'DATASCIENCE.JUPYTER_KERNEL_CODE_COMPLETION_CANNOT_RESOLVE',
     JupyterKernelApiUsage = 'DATASCIENCE.JUPYTER_KERNEL_API_USAGE',
+    NewJupyterKernelApiUsage = 'DATASCIENCE.JUPYTER_NEW_KERNEL_API_USAGE',
+    NewJupyterKernelsApiUsage = 'DATASCIENCE.JUPYTER_NEW_KERNELS_API_USAGE',
+    NewJupyterKernelApiExecution = 'DATASCIENCE.JUPYTER_NEW_KERNEL_API_EXEC',
+    NewJupyterKernelApiKernelStartupWaitUntil = 'DATASCIENCE.JUPYTER_NEW_KERNEL_API_KERNEL_STARTUP_WAIT_UNTIL',
     JupyterKernelApiAccess = 'DATASCIENCE.JUPYTER_KERNEL_API_ACCESS',
+    JupyterKernelStartupHook = 'DATASCIENCE.JUPYTER_KERNEL_STARTUP_HOOK',
+    JupyterKernelSpecEnumeration = 'DATASCIENCE.JUPYTER_KERNEL_SPEC_FETCH_FAILURE',
     JupyterKernelHiddenViaFilter = 'DATASCIENCE.JUPYTER_KERNEL_HIDDEN_VIA_FILTER',
     JupyterKernelFilterUsed = 'DATASCIENCE.JUPYTER_KERNEL_FILTER_USED',
-    JupyterInstalledButNotKernelSpecModule = 'DS_INTERNAL.JUPYTER_INTALLED_BUT_NO_KERNELSPEC_MODULE',
-    CreateNewNotebook = 'DATASCIENCE.NATIVE.CREATE_NEW_NOTEBOOK',
     DebugStepOver = 'DATASCIENCE.DEBUG_STEP_OVER',
     DebugContinue = 'DATASCIENCE.DEBUG_CONTINUE',
     DebugStop = 'DATASCIENCE.DEBUG_STOP',
     OpenNotebookAll = 'DATASCIENCE.NATIVE.OPEN_NOTEBOOK_ALL',
-    JupyterNotInstalledErrorShown = 'DATASCIENCE.JUPYTER_NOT_INSTALLED_ERROR_SHOWN',
-    RegisterInterpreterAsKernel = 'DS_INTERNAL.JUPYTER_REGISTER_INTERPRETER_AS_KERNEL',
     UserInstalledJupyter = 'DATASCIENCE.USER_INSTALLED_JUPYTER',
     UserInstalledPandas = 'DATASCIENCE.USER_INSTALLED_PANDAS',
     UserDidNotInstallJupyter = 'DATASCIENCE.USER_DID_NOT_INSTALL_JUPYTER',
     UserDidNotInstallPandas = 'DATASCIENCE.USER_DID_NOT_INSTALL_PANDAS',
     KernelSpecLanguage = 'DATASCIENCE.KERNEL_SPEC_LANGUAGE',
-    KernelSpecNotFound = 'DS_INTERNAL.KERNEL_SPEC_NOT_FOUND',
     KernelLauncherPerf = 'DS_INTERNAL.KERNEL_LAUNCHER_PERF',
-    PreferredKernel = 'DS_INTERNAL.PREFERRED_KERNEL',
-    RankKernelsPerf = 'DS_INTERNAL.RANK_KERNELS_PERF',
-    KernelListingPerf = 'DS_INTERNAL.KERNEL_LISTING_PERF',
+    AmbiguousGlobalKernelSpec = 'GLOBAL_PYTHON_KERNELSPEC',
     ActiveInterpreterListingPerf = 'DS_INTERNAL.ACTIVE_INTERPRETER_LISTING_PERF',
+    ExperimentLoad = 'DS_INTERNAL.EXPERIMENT_LOAD',
     PythonModuleInstall = 'DS_INTERNAL.PYTHON_MODULE_INSTALL',
     PythonNotInstalled = 'DS_INTERNAL.PYTHON_NOT_INSTALLED',
     PythonExtensionNotInstalled = 'DS_INTERNAL.PYTHON_EXTENSION_NOT_INSTALLED',
     PythonExtensionInstalledViaKernelPicker = 'DS_INTERNAL.PYTHON_EXTENSION_INSTALLED_VIA_KERNEL_PICKER',
-    JupyterCommandLineNonDefault = 'DS_INTERNAL.JUPYTER_CUSTOM_COMMAND_LINE',
     NewFileForInteractiveWindow = 'DS_INTERNAL.NEW_FILE_USED_IN_INTERACTIVE',
+    CreateInteractiveWindow = 'DS_INTERNAL.CREATED_INTERACTIVE_WINDOW',
     IPyWidgetLoadSuccess = 'DS_INTERNAL.IPYWIDGET_LOAD_SUCCESS',
     IPyWidgetLoadFailure = 'DS_INTERNAL.IPYWIDGET_LOAD_FAILURE',
     IPyWidgetWidgetVersionNotSupportedLoadFailure = 'DS_INTERNAL.IPYWIDGET_WIDGET_VERSION_NOT_SUPPORTED_LOAD_FAILURE',
@@ -497,7 +417,6 @@ export enum Telemetry {
     DiscoverIPyWidgetNamesPerf = 'DS_INTERNAL.IPYWIDGET_DISCOVER_WIDGETS_NB_EXTENSIONS',
     IPyWidgetPromptToUseCDN = 'DS_INTERNAL.IPYWIDGET_PROMPT_TO_USE_CDN',
     IPyWidgetPromptToUseCDNSelection = 'DS_INTERNAL.IPYWIDGET_PROMPT_TO_USE_CDN_SELECTION',
-    IPyWidgetOverhead = 'DS_INTERNAL.IPYWIDGET_OVERHEAD',
     IPyWidgetRenderFailure = 'DS_INTERNAL.IPYWIDGET_RENDER_FAILURE',
     IPyWidgetUnhandledMessage = 'DS_INTERNAL.IPYWIDGET_UNHANDLED_MESSAGE',
     RawKernelInfoResponse = 'DS_INTERNAL.RAWKERNEL_INFO_RESPONSE',
@@ -511,11 +430,15 @@ export enum Telemetry {
     NativeVariableViewLoaded = 'DS_INTERNAL.NATIVE_VARIABLE_VIEW_LOADED',
     NativeVariableViewMadeVisible = 'DS_INTERNAL.NATIVE_VARIABLE_VIEW_MADE_VISIBLE',
     NotebookStart = 'DATASCIENCE.NOTEBOOK_START',
+    NotebookFirstStartBreakDown = 'DATASCIENCE.NOTEBOOK_FIRST_START_BREAKDOWN',
+    NotebookFirstKernelAutoSelectionBreakDown = 'DATASCIENCE.NOTEBOOK_FIRST_KERNEL_AUTO_SELECTION_BREAKDOWN',
     NotebookInterrupt = 'DATASCIENCE.NOTEBOOK_INTERRUPT',
     NotebookRestart = 'DATASCIENCE.NOTEBOOK_RESTART',
     SwitchKernel = 'DS_INTERNAL.SWITCH_KERNEL',
     KernelCount = 'DS_INTERNAL.KERNEL_COUNT',
     ExecuteCell = 'DATASCIENCE.EXECUTE_CELL',
+    ExecuteCode = 'DATASCIENCE.EXECUTE_CODE',
+    ResumeCellExecution = 'DATASCIENCE.RESUME_EXECUTE_CELL',
     /**
      * Sent when a command we register is executed.
      */
@@ -537,6 +460,7 @@ export enum Telemetry {
      */
     DataViewerSliceOperation = 'DATASCIENCE.DATA_VIEWER_SLICE_OPERATION',
     RecommendExtension = 'DATASCIENCE.RECOMMENT_EXTENSION',
+    CreatePythonEnvironment = 'DATASCIENCE.CREATE_PYTHON_ENVIRONMENT',
     // Sent when we get a jupyter execute_request error reply when running some part of our internal variable fetching code
     PythonVariableFetchingCodeFailure = 'DATASCIENCE.PYTHON_VARIABLE_FETCHING_CODE_FAILURE',
     // Sent when we get a jupyter execute_request error reply when running some part of interactive window debug setup code
@@ -544,12 +468,15 @@ export enum Telemetry {
     KernelCrash = 'DATASCIENCE.KERNEL_CRASH',
     RunTest = 'DS_INTERNAL.RUNTEST',
     PreferredKernelExactMatch = 'DS_INTERNAL.PREFERRED_KERNEL_EXACT_MATCH',
-    JupyterInstalled = 'JUPYTER_IS_INSTALLED',
     NoActiveKernelSession = 'DATASCIENCE.NO_ACTIVE_KERNEL_SESSION',
     DataViewerUsingInterpreter = 'DATAVIEWER.USING_INTERPRETER',
     DataViewerUsingKernel = 'DATAVIEWER.USING_KERNEL',
     DataViewerWebviewLoaded = 'DATAVIEWER.WEBVIEW_LOADED',
-    PlotViewerWebviewLoaded = 'PLOTVIEWER.WEBVIEW_LOADED'
+    PlotViewerWebviewLoaded = 'PLOTVIEWER.WEBVIEW_LOADED',
+    EnterRemoteJupyterUrl = 'DATASCIENCE.ENTER_REMOTE_JUPYTER_URL',
+    NativeNotebookExecutionPerformance = 'DATASCIENCE.JUPYTER_NOTEBOOK_EXEC_PERFORMANCE',
+    JupyterNotebookExecutionPerformance = 'DATASCIENCE.JUPYTER_JUPYTER_NOTEBOOK_EXEC_PERFORMANCE',
+    NativeNotebookEditPerformance = 'DATASCIENCE.JUPYTER_NOTEBOOK_EDIT_PERFORMANCE'
 }
 
 export enum JupyterCommands {
@@ -564,3 +491,10 @@ export const DataScienceStartupTime = Symbol('DataScienceStartupTime');
 export const defaultNotebookFormat = { major: 4, minor: 2 };
 
 export const WIDGET_MIMETYPE = 'application/vnd.jupyter.widget-view+json';
+export const WIDGET_STATE_MIMETYPE = 'application/vnd.jupyter.widget-state+json';
+export const WIDGET_VERSION_NON_PYTHON_KERNELS = 7;
+
+/**
+ * Used as a fallback when determinining the extension id that calls into the Jupyter extension API fails.
+ */
+export const unknownExtensionId = 'unknown';

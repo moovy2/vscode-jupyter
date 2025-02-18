@@ -5,15 +5,14 @@
 import { assert } from 'chai';
 import * as path from '../../../platform/vscode-path/path';
 import { CancellationTokenSource, Uri, workspace } from 'vscode';
-import { IDocumentManager } from '../../../platform/common/application/types';
 import { IFileSystemNode } from '../../../platform/common/platform/types.node';
 import { ExportInterpreterFinder } from '../../../notebooks/export/exportInterpreterFinder.node';
-import { INbConvertExport, ExportFormat } from '../../../notebooks/export/types';
 import { IExtensionTestApi } from '../../common.node';
 import { EXTENSION_ROOT_DIR_FOR_TESTS } from '../../constants.node';
 import { closeActiveWindows, initialize } from '../../initialize.node';
+import { ExportToPython } from '../../../notebooks/export/exportToPython';
 
-suite('DataScience - Export Python', function () {
+suite('Export Python @export', function () {
     let api: IExtensionTestApi;
     this.timeout(10_000);
     suiteSetup(async function () {
@@ -23,7 +22,7 @@ suite('DataScience - Export Python', function () {
     suiteTeardown(closeActiveWindows);
     test('Export To Python', async () => {
         const fileSystem = api.serviceContainer.get<IFileSystemNode>(IFileSystemNode);
-        const exportToPython = api.serviceContainer.get<INbConvertExport>(INbConvertExport, ExportFormat.python);
+        const exportToPython = new ExportToPython();
         const target = Uri.file((await fileSystem.createTemporaryLocalFile('.py')).filePath);
         const token = new CancellationTokenSource();
         const exportInterpreterFinder = api.serviceContainer.get<ExportInterpreterFinder>(ExportInterpreterFinder);
@@ -33,8 +32,7 @@ suite('DataScience - Export Python', function () {
         );
         await exportToPython.export(document, target, interpreter, token.token);
         assert.exists(target);
-        const documentManager = api.serviceContainer.get<IDocumentManager>(IDocumentManager);
-        const targetDocument = await documentManager.openTextDocument(target!);
+        const targetDocument = await workspace.openTextDocument(target!);
         assert.include(targetDocument.getText(), 'tim = 1');
     });
 });

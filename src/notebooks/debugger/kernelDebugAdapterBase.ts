@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { KernelMessage } from '@jupyterlab/services';
+import type { KernelMessage } from '@jupyterlab/services';
 import {
     debug,
     DebugAdapter,
@@ -13,32 +11,24 @@ import {
     Event,
     EventEmitter,
     NotebookCell,
-    NotebookCellExecutionState,
-    NotebookCellExecutionStateChangeEvent,
     NotebookCellKind,
     NotebookDocument,
-    notebooks,
     Uri,
     workspace
 } from 'vscode';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import { executeSilently } from '../../kernels/helpers';
-import { IKernel, IKernelConnectionSession } from '../../kernels/types';
+import { IKernel, IKernelSession } from '../../kernels/types';
 import { IDebugService } from '../../platform/common/application/types';
 import { IPlatformService } from '../../platform/common/platform/types';
 import { IDisposable } from '../../platform/common/types';
 import { noop } from '../../platform/common/utils/misc';
-import { traceError, traceInfo, traceInfoIfCI, traceVerbose, traceWarning } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import * as path from '../../platform/vscode-path/path';
 import { sendTelemetryEvent } from '../../telemetry';
 import { DebuggingTelemetry } from './constants';
-import {
-    IDebuggingDelegate,
-    IDebugInfoResponse,
-    IKernelDebugAdapter,
-    INotebookDebugConfig,
-    KernelDebugMode
-} from './debuggingTypes';
+import { ResetKernelController } from './controllers/resetKernelController';
+import { IDebuggingDelegate, IDebugInfoResponse, IKernelDebugAdapter, INotebookDebugConfig } from './debuggingTypes';
 import {
     assertIsDebugConfig,
     getMessageSourceAndHookIt,
@@ -46,6 +36,12 @@ import {
     isShortNamePath,
     shortNameMatchesLongName
 } from './helper';
+import { SessionDisposedError } from '../../platform/errors/sessionDisposedError';
+import {
+    notebookCellExecutions,
+    NotebookCellExecutionState,
+    type NotebookCellExecutionStateChangeEvent
+} from '../../platform/notebooks/cellExecutionStateService';
 
 /**
  * For info on the custom requests implemented by jupyter see:
@@ -62,7 +58,7 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
     private readonly endSession = new EventEmitter<DebugSession>();
     private readonly configuration: INotebookDebugConfig;
     protected readonly disposables: IDisposable[] = [];
-    private delegates: IDebuggingDelegate[] | undefined;
+    private delegates: IDebuggingDelegate[] = [];
     onDidSendMessage: Event<DebugProtocolMessage> = this.sendMessage.event;
     onDidEndSession: Event<DebugSession> = this.endSession.event;
     public readonly debugCell: NotebookCell | undefined;
@@ -70,22 +66,18 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
     constructor(
         protected session: DebugSession,
         protected notebookDocument: NotebookDocument,
-        protected readonly jupyterSession: IKernelConnectionSession,
+        protected readonly jupyterSession: IKernelSession,
         private readonly kernel: IKernel | undefined,
         private readonly platformService: IPlatformService,
         private readonly debugService: IDebugService
     ) {
-        traceInfoIfCI(`Creating kernel debug adapter for debugging notebooks`);
+        logger.ci(`Creating kernel debug adapter for debugging notebooks`);
         const configuration = this.session.configuration;
         assertIsDebugConfig(configuration);
         this.configuration = configuration;
-        if (
-            configuration.__mode === KernelDebugMode.InteractiveWindow ||
-            configuration.__mode === KernelDebugMode.Cell ||
-            configuration.__mode === KernelDebugMode.RunByLine
-        ) {
-            this.debugCell = notebookDocument.cellAt(configuration.__cellIndex!);
-        }
+        this.debugCell = notebookDocument.cellAt(configuration.__cellIndex!);
+
+        this.addDebuggingDelegates([new ResetKernelController(this)]);
 
         this.jupyterSession.kernel?.iopubMessage.connect(this.onIOPubMessage, this);
         this.disposables.push(
@@ -94,12 +86,12 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
 
         if (this.kernel) {
             this.kernel.addHook('willRestart', () => this.disconnect(), this, this.disposables);
-            this.kernel.addHook('willInterrupt', () => this.disconnect(), this, this.disposables);
+            this.kernel.addHook('interruptCompleted', () => this.disconnect(), this, this.disposables);
             this.disposables.push(
                 this.kernel.onDisposed(() => {
                     if (!this.disconnected) {
                         debug.stopDebugging(this.session).then(noop, noop);
-                        this.disconnect().ignoreErrors();
+                        this.disconnect().catch(noop);
                         sendTelemetryEvent(DebuggingTelemetry.endedSession, undefined, { reason: 'onKernelDisposed' });
                     }
                 })
@@ -107,7 +99,7 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
         }
 
         this.disposables.push(
-            notebooks.onDidChangeNotebookCellExecutionState(
+            notebookCellExecutions.onDidChangeNotebookCellExecutionState(
                 (cellStateChange: NotebookCellExecutionStateChangeEvent) => {
                     // If a cell has moved to idle, stop the debug session
                     if (
@@ -116,7 +108,7 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
                         !this.disconnected
                     ) {
                         sendTelemetryEvent(DebuggingTelemetry.endedSession, undefined, { reason: 'normally' });
-                        this.disconnect().ignoreErrors();
+                        this.disconnect().catch(noop);
                     }
                 },
                 this,
@@ -130,7 +122,7 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
                     e.contentChanges.forEach((change) => {
                         change.removedCells.forEach((cell: NotebookCell) => {
                             if (cell === this.debugCell) {
-                                this.disconnect().ignoreErrors();
+                                this.disconnect().catch(noop);
                             }
                         });
                     });
@@ -141,23 +133,23 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
         );
         this.disposables.push(
             this.debugService.onDidTerminateDebugSession((e) => {
-                if (e === this.session) {
-                    this.disconnect().ignoreErrors();
+                if (e === this.session || e === this.session) {
+                    this.disconnect().catch(noop);
                 }
             })
         );
     }
 
-    public setDebuggingDelegates(delegates: IDebuggingDelegate[]) {
-        this.delegates = delegates;
+    public addDebuggingDelegates(delegates: IDebuggingDelegate[]) {
+        this.delegates.push(...delegates);
     }
 
     private trace(tag: string, msg: string) {
-        traceVerbose(`[Debug] ${tag}: ${msg}`);
+        logger.debug(`[Debug] ${tag}: ${msg}`);
     }
 
     async onIOPubMessage(_: unknown, msg: KernelMessage.IIOPubMessage) {
-        traceInfoIfCI(`Debug IO Pub message: ${JSON.stringify(msg)}`);
+        logger.ci(`Debug IO Pub message: ${JSON.stringify(msg)}`);
         if (isDebugEventMsg(msg)) {
             this.trace('event', JSON.stringify(msg));
             for (const d of this.delegates ?? []) {
@@ -173,10 +165,15 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
     /**
      * Handle a message from the client to the debug adapter.
      */
-    async handleMessage(message: DebugProtocol.ProtocolMessage) {
+    handleMessage(message: DebugProtocol.ProtocolMessage): void {
+        this.handleClientMessageAsync(message).catch(noop);
+    }
+
+    protected async handleClientMessageAsync(message: DebugProtocol.ProtocolMessage): Promise<void> {
         try {
-            traceInfoIfCI(`KernelDebugAdapter::handleMessage ${JSON.stringify(message, undefined, ' ')}`);
-            // intercept 'setBreakpoints' request
+            logger.ci(`KernelDebugAdapter::handleMessage ${JSON.stringify(message, undefined, ' ')}`);
+
+            // Necessary, since dumpCell usually runs before debugging starts?
             if (message.type === 'request' && (message as DebugProtocol.Request).command === 'setBreakpoints') {
                 const args = (message as DebugProtocol.Request).arguments;
                 if (args.source && args.source.path && args.source.path.indexOf('vscode-notebook-cell:') === 0) {
@@ -187,14 +184,6 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
                         await this.dumpCell(cell.index);
                     }
                 }
-            }
-
-            // after attaching, send a 'debugInfo' request
-            // reset breakpoints and continue stopped threads if there are any
-            // we do this in case the kernel is stopped when we attach
-            // This might happen if VS Code or the extension host crashes
-            if (message.type === 'request' && (message as DebugProtocol.Request).command === 'attach') {
-                await this.debugInfo();
             }
 
             if (message.type === 'request') {
@@ -208,9 +197,9 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
                 }
             }
 
-            return this.sendRequestToJupyterSession(message);
+            await this.sendMessageToJupyterSession(message);
         } catch (e) {
-            traceError(`KernelDebugAdapter::handleMessage failure: ${e}`);
+            logger.error(`KernelDebugAdapter::handleMessage failure: ${e}`);
         }
     }
 
@@ -222,19 +211,40 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
         return this.session.customRequest('stepIn', { threadId });
     }
 
+    public async debugInfo(): Promise<IDebugInfoResponse> {
+        return await this.session.customRequest('debugInfo');
+    }
+
+    public continueDirect(threadId: number): void {
+        if (!this.jupyterSession.kernel) {
+            throw new SessionDisposedError();
+        }
+        this.jupyterSession.kernel.requestDebug({
+            seq: 0,
+            type: 'request',
+            command: 'continue',
+            arguments: {
+                threadId
+            }
+        });
+    }
+
     public async disconnect() {
         if (!this.disconnected) {
             this.disconnected = true;
-            if (this.debugService.activeDebugSession === this.session) {
+            if (
+                this.debugService.activeDebugSession === this.session ||
+                this.debugService.activeDebugSession?.id === this.session.id
+            ) {
                 try {
                     await Promise.all([
                         this.deleteDumpedFiles().catch((ex) =>
-                            traceWarning('Error deleting temporary debug files.', ex)
+                            logger.warn('Error deleting temporary debug files.', ex)
                         ),
                         this.session.customRequest('disconnect', { restart: false })
                     ]);
                 } catch (e) {
-                    traceError(`Failed to disconnect debug session`, e);
+                    logger.error(`Failed to disconnect debug session`, e);
                 }
             }
             this.endSession.fire(this.session);
@@ -266,23 +276,7 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
     }
     protected abstract dumpCell(index: number): Promise<void>;
 
-    private async debugInfo(): Promise<void> {
-        const response = await this.session.customRequest('debugInfo');
-
-        // If there's stopped threads at this point, continue them all
-        (response as IDebugInfoResponse).stoppedThreads.forEach((thread: number) => {
-            this.jupyterSession.requestDebug({
-                seq: 0,
-                type: 'request',
-                command: 'continue',
-                arguments: {
-                    threadId: thread
-                }
-            });
-        });
-    }
-
-    private lookupCellByLongName(sourcePath: string) {
+    protected lookupCellByLongName(sourcePath: string) {
         if (!this.platformService.isWindows) {
             return undefined;
         }
@@ -297,43 +291,23 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
         return undefined;
     }
 
-    protected async sendRequestToJupyterSession(message: DebugProtocol.ProtocolMessage) {
-        if (this.jupyterSession.disposed || this.jupyterSession.status === 'dead') {
-            traceInfo(`Skipping sending message ${message.type} because session is disposed`);
+    protected async sendMessageToJupyterSession(message: DebugProtocol.ProtocolMessage) {
+        if (this.jupyterSession.isDisposed || this.jupyterSession.status === 'dead' || !this.jupyterSession.kernel) {
+            logger.info(`Skipping sending message ${message.type} because session is disposed`);
             return;
         }
-        // map Source paths from VS Code to Ipykernel temp files
-        getMessageSourceAndHookIt(message, this.translateRealFileToDebuggerFile.bind(this));
 
         this.trace('to kernel', JSON.stringify(message));
         if (message.type === 'request') {
-            const request = message as DebugProtocol.Request;
-            const control = this.jupyterSession.requestDebug(
-                {
-                    seq: request.seq,
-                    type: 'request',
-                    command: request.command,
-                    arguments: request.arguments
-                },
-                true
-            );
-
-            control.onReply = async (msg) => {
-                const message = msg.content as DebugProtocol.Response;
-                getMessageSourceAndHookIt(message, this.translateDebuggerFileToRealFile.bind(this));
-
-                for (const d of this.delegates ?? []) {
-                    await d?.willSendResponse?.(message);
-                }
-
-                this.trace('response', JSON.stringify(message));
-                this.sendMessage.fire(message);
-            };
-            return control.done;
+            const response = await this.sendRequestToJupyterSession(message);
+            if (response) {
+                this.sendMessage.fire(response);
+            }
         } else if (message.type === 'response') {
+            getMessageSourceAndHookIt(message, this.translateRealLocationToDebuggerLocation.bind(this));
             // responses of reverse requests
             const response = message as DebugProtocol.Response;
-            const control = this.jupyterSession.requestDebug(
+            const control = this.jupyterSession.kernel.requestDebug(
                 {
                     seq: response.seq,
                     type: 'request',
@@ -344,13 +318,50 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
             return control.done;
         } else {
             // cannot send via iopub, no way to handle events even if they existed
-            traceError(`Unknown message type to send ${message.type}`);
+            logger.error(`Unknown message type to send ${message.type}`);
         }
     }
-    protected translateDebuggerFileToRealFile(
-        source: DebugProtocol.Source | undefined,
-        _lines?: { line?: number; endLine?: number; lines?: number[] }
+
+    protected async sendRequestToJupyterSession(
+        message: DebugProtocol.ProtocolMessage
+    ): Promise<DebugProtocol.Response> {
+        getMessageSourceAndHookIt(message, this.translateRealLocationToDebuggerLocation.bind(this));
+        if (!this.jupyterSession.kernel) {
+            throw new SessionDisposedError();
+        }
+
+        this.trace('to kernel, mapped', JSON.stringify(message));
+        const request = message as DebugProtocol.Request;
+        const control = this.jupyterSession.kernel.requestDebug(
+            {
+                seq: request.seq,
+                type: 'request',
+                command: request.command,
+                arguments: request.arguments
+            },
+            true
+        );
+        const msg = await control.done;
+        const response = msg.content as DebugProtocol.Response;
+        getMessageSourceAndHookIt(response, this.translateDebuggerLocationToRealLocation.bind(this));
+
+        for (const d of this.delegates ?? []) {
+            await d?.willSendResponse?.(response);
+        }
+
+        this.trace('response', JSON.stringify(response));
+        return response;
+    }
+
+    protected translateDebuggerLocationToRealLocation(
+        location: {
+            source?: DebugProtocol.Source;
+            line?: number;
+            endLine?: number;
+        },
+        source?: DebugProtocol.Source
     ) {
+        source = location?.source ?? source;
         if (source && source.path) {
             const mapping = this.fileToCell.get(source.path) ?? this.lookupCellByLongName(source.path);
             if (mapping) {
@@ -359,16 +370,21 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
             }
         }
     }
-    protected abstract translateRealFileToDebuggerFile(
-        source: DebugProtocol.Source | undefined,
-        _lines?: { line?: number; endLine?: number; lines?: number[] }
+
+    protected abstract translateRealLocationToDebuggerLocation(
+        location: {
+            source?: DebugProtocol.Source;
+            line?: number;
+            endLine?: number;
+        },
+        source?: DebugProtocol.Source
     ): void;
 
     protected abstract getDumpFilesForDeletion(): string[];
     private async deleteDumpedFiles(): Promise<void> {
         const fileValues = this.getDumpFilesForDeletion();
         // Need to have our Jupyter Session and some dumpCell files to delete
-        if (this.jupyterSession && fileValues.length) {
+        if (this.jupyterSession.kernel && fileValues.length) {
             // Create our python string of file names
             const fileListString = fileValues
                 .map((filePath) => {
@@ -378,16 +394,17 @@ export abstract class KernelDebugAdapterBase implements DebugAdapter, IKernelDeb
                 .join(',');
 
             // Insert into our delete snippet
-            const deleteFilesCode = `import os
+            const deleteFilesCode = `import os as _VSCODE_os
 _VSCODE_fileList = [${fileListString}]
 for file in _VSCODE_fileList:
     try:
-        os.remove(file)
+        _VSCODE_os.remove(file)
     except:
         pass
-del _VSCODE_fileList`;
+del _VSCODE_fileList
+del _VSCODE_os`;
 
-            await executeSilently(this.jupyterSession, deleteFilesCode, {
+            await executeSilently(this.jupyterSession.kernel, deleteFilesCode, {
                 traceErrors: true,
                 traceErrorsMessage: 'Error deleting temporary debugging files'
             });

@@ -1,25 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { IExtensionSingleActivationService } from '../activation/types';
-import { EnvironmentActivationService } from '../common/process/environmentActivationService.node';
+import { IExtensionSyncActivationService } from '../activation/types';
+import { EnvironmentActivationService } from '../interpreter/environmentActivationService.node';
 import { IEnvironmentActivationService } from '../interpreter/activation/types';
-import { IInterpreterSelector } from '../interpreter/configuration/types';
 import { IInterpreterService } from '../interpreter/contracts';
 import { InterpreterStatusBarVisibility } from '../interpreter/display/visibilityFilter.node';
 import { IServiceManager } from '../ioc/types';
-import { InterpreterSelector, InterpreterService, PythonApiProvider, PythonExtensionChecker } from './pythonApi';
+import { InterpreterService, OldPythonApiProvider, PythonExtensionChecker } from './pythonApi';
 import { IPythonApiProvider, IPythonExtensionChecker } from './types';
 
 export function registerTypes(serviceManager: IServiceManager): void {
-    serviceManager.addSingleton<IPythonApiProvider>(IPythonApiProvider, PythonApiProvider);
+    serviceManager.addSingleton<IPythonApiProvider>(IPythonApiProvider, OldPythonApiProvider);
     serviceManager.addSingleton<IPythonExtensionChecker>(IPythonExtensionChecker, PythonExtensionChecker);
     serviceManager.addSingleton<IInterpreterService>(IInterpreterService, InterpreterService);
-    serviceManager.addSingleton<IInterpreterSelector>(IInterpreterSelector, InterpreterSelector);
-    serviceManager.addSingleton<IExtensionSingleActivationService>(
-        IExtensionSingleActivationService,
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
         InterpreterStatusBarVisibility
     );
     serviceManager.addSingleton<IEnvironmentActivationService>(

@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import '../../../platform/common/extensions';
-import { Uri, WebviewView as vscodeWebviewView } from 'vscode';
+import { Uri, WebviewView as vscodeWebviewView, window } from 'vscode';
 import { joinPath } from '../../../platform/vscode-path/resources';
 import { capturePerfTelemetry, sendTelemetryEvent, Telemetry } from '../../../telemetry';
 import { INotebookWatcher, IVariableViewPanelMapping } from './types';
@@ -14,15 +12,9 @@ import {
     IJupyterVariablesRequest,
     IJupyterVariablesResponse
 } from '../../../kernels/variables/types';
-import {
-    IWorkspaceService,
-    IWebviewViewProvider,
-    IApplicationShell,
-    ICommandManager,
-    IDocumentManager
-} from '../../../platform/common/application/types';
+import { IWebviewViewProvider } from '../../../platform/common/application/types';
 import { ContextKey } from '../../../platform/common/contextKey';
-import { traceError } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import {
     Resource,
     IConfigurationService,
@@ -30,58 +22,43 @@ import {
     IDisposable,
     IExtensionContext
 } from '../../../platform/common/types';
-import * as localize from '../../../platform/common/utils/localize';
-import { DataViewerChecker } from '../dataviewer/dataViewerChecker';
-import { IJupyterVariableDataProviderFactory, IDataViewerFactory, IDataViewer } from '../dataviewer/types';
 import { WebviewViewHost } from '../../../platform/webviews/webviewViewHost';
 import { swallowExceptions } from '../../../platform/common/utils/decorators';
 import { noop } from '../../../platform/common/utils/misc';
+import { DataViewerDelegator } from '../dataviewer/dataViewerDelegator';
 
 // This is the client side host for the native notebook variable view webview
 // It handles passing messages to and from the react view as well as the connection
 // to execution and changing of the active notebook
 export class VariableView extends WebviewViewHost<IVariableViewPanelMapping> implements IDisposable {
-    private dataViewerChecker: DataViewerChecker;
     protected get owningResource(): Resource {
         return undefined;
     }
     constructor(
         configuration: IConfigurationService,
-        workspaceService: IWorkspaceService,
         provider: IWebviewViewProvider,
         context: IExtensionContext,
         private readonly variables: IJupyterVariables,
         private readonly disposables: IDisposableRegistry,
-        private readonly appShell: IApplicationShell,
-        private readonly jupyterVariableDataProviderFactory: IJupyterVariableDataProviderFactory,
-        private readonly dataViewerFactory: IDataViewerFactory,
         private readonly notebookWatcher: INotebookWatcher,
-        private readonly commandManager: ICommandManager,
-        private readonly documentManager: IDocumentManager
+        private readonly dataViewerDelegator: DataViewerDelegator
     ) {
-        const variableViewDir = joinPath(context.extensionUri, 'out', 'webviews', 'webview-side', 'viewers');
-        super(
-            configuration,
-            workspaceService,
-            (c, d) => new VariableViewMessageListener(c, d),
-            provider,
-            variableViewDir,
-            [joinPath(variableViewDir, 'variableView.js')]
-        );
+        const variableViewDir = joinPath(context.extensionUri, 'dist', 'webviews', 'webview-side', 'viewers');
+        super(configuration, (c, d) => new VariableViewMessageListener(c, d), provider, variableViewDir, [
+            joinPath(variableViewDir, 'variableView.js')
+        ]);
 
         // Sign up if the active variable view notebook is changed, restarted or updated
-        this.notebookWatcher.onDidExecuteActiveNotebook(this.activeNotebookExecuted, this, this.disposables);
+        this.notebookWatcher.onDidFinishExecutingActiveNotebook(this.activeNotebookExecuted, this, this.disposables);
         this.notebookWatcher.onDidChangeActiveNotebook(this.activeNotebookChanged, this, this.disposables);
         this.notebookWatcher.onDidRestartActiveNotebook(this.activeNotebookRestarted, this, this.disposables);
         this.variables.refreshRequired(this.sendRefreshMessage, this, this.disposables);
-        this.documentManager.onDidChangeActiveTextEditor(this.activeTextEditorChanged, this, this.disposables);
-
-        this.dataViewerChecker = new DataViewerChecker(configuration, appShell);
+        window.onDidChangeActiveTextEditor(this.activeTextEditorChanged, this, this.disposables);
     }
 
     @capturePerfTelemetry(Telemetry.NativeVariableViewLoaded)
     public async load(codeWebview: vscodeWebviewView) {
-        await super.loadWebview(Uri.file(process.cwd()), codeWebview).catch(traceError);
+        await super.loadWebview(Uri.file(process.cwd()), codeWebview).catch(logger.error);
 
         // After loading, hook up our visibility watch and check the initial visibility
         if (this.webviewView) {
@@ -129,12 +106,12 @@ export class VariableView extends WebviewViewHost<IVariableViewPanelMapping> imp
 
     // Variable view visibility has changed. Update our context key for command enable / disable
     private handleVisibilityChanged() {
-        const context = new ContextKey('jupyter.variableViewVisible', this.commandManager);
+        const context = new ContextKey('jupyter.variableViewVisible');
         let visible = false;
         if (this.webviewView) {
             visible = this.webviewView.visible;
         }
-        context.set(visible).ignoreErrors();
+        context.set(visible).catch(noop);
 
         // I've we've been made visible, make sure that we are updated
         if (visible) {
@@ -144,35 +121,30 @@ export class VariableView extends WebviewViewHost<IVariableViewPanelMapping> imp
             if (this.notebookWatcher.activeNotebookExecutionCount !== undefined) {
                 this.postMessage(InteractiveWindowMessages.UpdateVariableViewExecutionCount, {
                     executionCount: this.notebookWatcher.activeNotebookExecutionCount
-                }).ignoreErrors();
+                }).catch(noop);
             } else {
                 // No active view, so just trigger refresh to clear
-                this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).ignoreErrors();
+                this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).catch(noop);
             }
         }
     }
 
     // Handle a request from the react UI to show our data viewer. Public for testing
     @swallowExceptions()
-    public async showDataViewer(request: IShowDataViewer): Promise<IDataViewer | undefined> {
-        try {
-            if (
-                this.notebookWatcher.activeKernel &&
-                (await this.dataViewerChecker.isRequestedColumnSizeAllowed(request.columnSize, this.owningResource))
-            ) {
-                // Create a variable data provider and pass it to the data viewer factory to create the data viewer
-                const jupyterVariableDataProvider = await this.jupyterVariableDataProviderFactory.create(
-                    request.variable,
-                    this.notebookWatcher.activeKernel
-                );
-                const title: string = `${localize.DataScience.dataExplorerTitle()} - ${request.variable.name}`;
-                return await this.dataViewerFactory.create(jupyterVariableDataProvider, title);
-            }
-        } catch (e) {
-            traceError(e);
-            sendTelemetryEvent(Telemetry.FailedShowDataViewer);
-            this.appShell.showErrorMessage(localize.DataScience.showDataViewerFail()).then(noop, noop);
-        }
+    public async showDataViewer(request: IShowDataViewer) {
+        request.variable.fileName = request.variable.fileName ?? this.notebookWatcher.activeKernel?.notebook.uri;
+        return this.dataViewerDelegator.showContributedDataViewer(request.variable, true);
+    }
+
+    private postProcessSupportsDataExplorer(response: IJupyterVariablesResponse) {
+        const variableViewers = this.dataViewerDelegator.getVariableViewers();
+        response.pageResponse.forEach((variable) => {
+            variable.supportsDataExplorer = variableViewers.some((d) =>
+                d.jupyterVariableViewers.dataTypes.includes(variable.type)
+            );
+        });
+
+        return response;
     }
 
     // Variables for the current active editor are being requested, check that we have a valid active notebook
@@ -183,7 +155,10 @@ export class VariableView extends WebviewViewHost<IVariableViewPanelMapping> imp
         if (activeNotebook) {
             const response = await this.variables.getVariables(args, activeNotebook);
 
-            this.postMessage(InteractiveWindowMessages.GetVariablesResponse, response).ignoreErrors();
+            this.postMessage(
+                InteractiveWindowMessages.GetVariablesResponse,
+                this.postProcessSupportsDataExplorer(response)
+            ).catch(noop);
             sendTelemetryEvent(Telemetry.VariableExplorerVariableCount, {
                 variableCount: response.totalCount
             });
@@ -197,7 +172,7 @@ export class VariableView extends WebviewViewHost<IVariableViewPanelMapping> imp
                 refreshCount: args.refreshCount
             };
 
-            this.postMessage(InteractiveWindowMessages.GetVariablesResponse, response).ignoreErrors();
+            this.postMessage(InteractiveWindowMessages.GetVariablesResponse, response).catch(noop);
         }
     }
 
@@ -205,7 +180,7 @@ export class VariableView extends WebviewViewHost<IVariableViewPanelMapping> imp
     private async activeNotebookExecuted(args: { executionCount: number }) {
         this.postMessage(InteractiveWindowMessages.UpdateVariableViewExecutionCount, {
             executionCount: args.executionCount
-        }).ignoreErrors();
+        }).catch(noop);
     }
 
     // The active variable new notebook has changed, so force a refresh on the view to pick up the new info
@@ -213,26 +188,26 @@ export class VariableView extends WebviewViewHost<IVariableViewPanelMapping> imp
         if (arg.executionCount) {
             this.postMessage(InteractiveWindowMessages.UpdateVariableViewExecutionCount, {
                 executionCount: arg.executionCount
-            }).ignoreErrors();
+            }).catch(noop);
         } else {
             this.postMessage(InteractiveWindowMessages.UpdateVariableViewExecutionCount, {
                 executionCount: 0
-            }).ignoreErrors();
+            }).catch(noop);
         }
 
-        this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).ignoreErrors();
+        this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).catch(noop);
     }
 
     // Active text editor changed. Editor may not be associated with a notebook
     private activeTextEditorChanged() {
-        this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).ignoreErrors();
+        this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).catch(noop);
     }
 
     private async activeNotebookRestarted() {
-        this.postMessage(InteractiveWindowMessages.RestartKernel).ignoreErrors();
+        this.postMessage(InteractiveWindowMessages.RestartKernel).catch(noop);
     }
 
     private async sendRefreshMessage() {
-        this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).ignoreErrors();
+        this.postMessage(InteractiveWindowMessages.ForceVariableRefresh).catch(noop);
     }
 }

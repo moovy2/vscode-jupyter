@@ -1,19 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 
 import { Uri } from 'vscode';
-import { PythonVersion } from './pythonVersion';
-
-type ReleaseLevel = 'alpha' | 'beta' | 'candidate' | 'final' | 'unknown';
-
-/**
- * The components of a Python version.
- *
- * These match the elements of `sys.version_info`.
- */
-export type PythonVersionInfo = [number, number, number, ReleaseLevel];
 
 /**
  * The supported Python environment types.
@@ -30,36 +19,9 @@ export enum EnvironmentType {
 }
 
 /**
- * Details about a Python runtime.
- *
- * @prop path - the location of the executable file
- * @prop version - the runtime version
- * @prop sysVersion - the raw value of `sys.version`
- * @prop sysPrefix - the environment's install root (`sys.prefix`)
+ * Details about a Python environment.
  */
-export type InterpreterInformation = {
+export interface PythonEnvironment {
     id: string;
     uri: Uri;
-    version?: PythonVersion;
-    sysVersion?: string;
-    sysPrefix: string;
-};
-
-/**
- * Details about a Python environment.
- * @prop envType - the kind of Python environment
- */
-export type PythonEnvironment = InterpreterInformation & {
-    displayName?: string;
-    envType?: EnvironmentType;
-    envName?: string;
-    /**
-     * Directory of the Python environment.
-     */
-    envPath?: Uri;
-    /**
-     * This contains the path to the environment.
-     * Used for display purposes only (in kernel picker or other places).
-     */
-    displayPath?: Uri;
 };

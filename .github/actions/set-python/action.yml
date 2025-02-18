@@ -1,11 +1,11 @@
 name: 'Set Python'
-description: "Sets python to a specific version"
+description: 'Sets python to a specific version'
 
 inputs:
   PYTHON_VERSION:
-     description: 'Version of python'
-     required: true
-     default: python
+    description: 'Version of python'
+    required: true
+    default: python
 outputs:
   CI_PYTHON_PATH:
     description: 'Path to the python'
@@ -16,7 +16,7 @@ runs:
     - name: Output python path
       id: python_run
       shell: bash
-      run: python -c "import sys;print('::set-output name=python_path::' + sys.executable)"
+      run: python -c "import sys;print('python_path=' + sys.executable)" >> $GITHUB_OUTPUT
 
     - name: Push to environment
       shell: bash

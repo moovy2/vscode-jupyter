@@ -1,11 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import * as Types from '../utils/sysTypes';
 import { IStringDictionary, ISystemVariables } from './types';
 
-/* eslint-disable , @typescript-eslint/no-explicit-any, , jsdoc/check-alignment,jsdoc/check-indentation,jsdoc/newline-after-description, no-restricted-syntax, prefer-const,  */
+/* eslint-disable , @typescript-eslint/no-explicit-any, , jsdoc/check-alignment,jsdoc/check-indentation, no-restricted-syntax, prefer-const,  */
 
 /**
  * Resolves vscode style environment variables in a string. Example ${workspaceRoot}

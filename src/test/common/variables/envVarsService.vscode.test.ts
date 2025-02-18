@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 /* eslint-disable  */
 
 import { expect, use } from 'chai';
@@ -12,7 +10,6 @@ import { FileSystem } from '../../../platform/common/platform/fileSystem.node';
 import { EnvironmentVariablesService } from '../../../platform/common/variables/environment.node';
 import { IEnvironmentVariablesService } from '../../../platform/common/variables/types';
 import { initialize } from '../../initialize';
-import { IExtensionContext, IHttpClient } from '../../../platform/common/types';
 
 use(chaiAsPromised);
 
@@ -34,11 +31,8 @@ const envFilesFolderPath = path.join(
 suite('Environment Variables Service', () => {
     let variablesService: IEnvironmentVariablesService;
     setup(async () => {
-        const api = await initialize();
-        const fs = new FileSystem(
-            api.serviceManager.get<IExtensionContext>(IExtensionContext),
-            api.serviceManager.get<IHttpClient>(IHttpClient)
-        );
+        await initialize();
+        const fs = new FileSystem();
         variablesService = new EnvironmentVariablesService(fs);
     });
 

@@ -1,31 +1,34 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-import { inject, injectable, multiInject } from 'inversify';
-import { NotebookDocument, Uri } from 'vscode';
-import { IApplicationShell, IVSCodeNotebook } from '../platform/common/application/types';
+import { inject, injectable, multiInject, named } from 'inversify';
+import { Memento, NotebookDocument, Uri } from 'vscode';
 import {
     IAsyncDisposableRegistry,
     IConfigurationService,
     IDisposableRegistry,
-    IExtensionContext
+    IExtensionContext,
+    IMemento,
+    WORKSPACE_MEMENTO
 } from '../platform/common/types';
 import { BaseCoreKernelProvider, BaseThirdPartyKernelProvider } from './kernelProvider.base';
-import { InteractiveWindowView } from '../platform/common/constants';
+import { InteractiveWindowView, JupyterNotebookView } from '../platform/common/constants';
 import { Kernel, ThirdPartyKernel } from './kernel';
 import {
     IThirdPartyKernel,
     IKernel,
-    INotebookProvider,
-    IStartupCodeProvider,
     ITracebackFormatter,
     KernelOptions,
-    ThirdPartyKernelOptions
+    ThirdPartyKernelOptions,
+    IStartupCodeProviders,
+    IKernelSessionFactory
 } from './types';
 import { IJupyterServerUriStorage } from './jupyter/types';
 import { createKernelSettings } from './kernelSettings';
 import { NotebookKernelExecution } from './kernelExecution';
+import { IReplNotebookTrackerService } from '../platform/notebooks/replNotebookTrackerService';
+import { logger } from '../platform/logging';
+import { getDisplayPath } from '../platform/common/platform/fs-paths';
 
 /**
  * Node version of a kernel provider. Needed in order to create the node version of a kernel.
@@ -35,18 +38,18 @@ export class KernelProvider extends BaseCoreKernelProvider {
     constructor(
         @inject(IAsyncDisposableRegistry) asyncDisposables: IAsyncDisposableRegistry,
         @inject(IDisposableRegistry) disposables: IDisposableRegistry,
-        @inject(INotebookProvider) private notebookProvider: INotebookProvider,
+        @inject(IKernelSessionFactory) private sessionCreator: IKernelSessionFactory,
         @inject(IConfigurationService) private configService: IConfigurationService,
-        @inject(IApplicationShell) private readonly appShell: IApplicationShell,
-        @inject(IVSCodeNotebook) notebook: IVSCodeNotebook,
         @inject(IExtensionContext) private readonly context: IExtensionContext,
         @inject(IJupyterServerUriStorage) jupyterServerUriStorage: IJupyterServerUriStorage,
         @multiInject(ITracebackFormatter)
         private readonly formatters: ITracebackFormatter[],
-        @multiInject(IStartupCodeProvider) private readonly startupCodeProviders: IStartupCodeProvider[]
+        @inject(IStartupCodeProviders) private readonly startupCodeProviders: IStartupCodeProviders,
+        @inject(IMemento) @named(WORKSPACE_MEMENTO) private readonly workspaceStorage: Memento,
+        @inject(IReplNotebookTrackerService) private readonly replTracker: IReplNotebookTrackerService
     ) {
-        super(asyncDisposables, disposables, notebook);
-        disposables.push(jupyterServerUriStorage.onDidRemoveUris(this.handleUriRemoval.bind(this)));
+        super(asyncDisposables, disposables);
+        disposables.push(jupyterServerUriStorage.onDidRemove(this.handleServerRemoval.bind(this)));
     }
 
     public getOrCreate(notebook: NotebookDocument, options: KernelOptions): IKernel {
@@ -54,20 +57,31 @@ export class KernelProvider extends BaseCoreKernelProvider {
         if (existingKernelInfo && existingKernelInfo.options.metadata.id === options.metadata.id) {
             return existingKernelInfo.kernel;
         }
-        this.disposeOldKernel(notebook);
+        if (existingKernelInfo) {
+            logger.trace(
+                `Kernel for ${getDisplayPath(notebook.uri)} with id ${
+                    existingKernelInfo.options.metadata.id
+                } is being replaced with ${options.metadata.id}`
+            );
+        }
+        this.disposeOldKernel(notebook, 'createNewKernel');
 
-        const resourceUri = notebook.notebookType === InteractiveWindowView ? options.resourceUri : notebook.uri;
+        const replKernel = this.replTracker.isForReplEditor(notebook);
+        const resourceUri = replKernel ? options.resourceUri : notebook.uri;
         const settings = createKernelSettings(this.configService, resourceUri);
+        const startupCodeProviders = this.startupCodeProviders.getProviders(
+            replKernel ? InteractiveWindowView : JupyterNotebookView
+        );
 
         const kernel: IKernel = new Kernel(
             resourceUri,
             notebook,
             options.metadata,
-            this.notebookProvider,
+            this.sessionCreator,
             settings,
-            this.appShell,
             options.controller,
-            this.startupCodeProviders
+            startupCodeProviders,
+            this.workspaceStorage
         );
         kernel.onRestarted(() => this._onDidRestartKernel.fire(kernel), this, this.disposables);
         kernel.onDisposed(
@@ -83,11 +97,13 @@ export class KernelProvider extends BaseCoreKernelProvider {
             this,
             this.disposables
         );
-
-        this.executions.set(
-            kernel,
-            new NotebookKernelExecution(kernel, this.appShell, this.context, this.formatters, notebook)
+        kernel.onPostInitialized(
+            (e) => e.waitUntil(this._onDidPostInitializeKernel.fireAsync({ kernel }, e.token)),
+            this,
+            this.disposables
         );
+
+        this.executions.set(kernel, new NotebookKernelExecution(kernel, this.context, this.formatters, notebook));
         this.asyncDisposables.push(kernel);
         this.storeKernel(notebook, options, kernel);
         this.deleteMappingIfKernelIsDisposed(kernel);
@@ -100,17 +116,15 @@ export class ThirdPartyKernelProvider extends BaseThirdPartyKernelProvider {
     constructor(
         @inject(IAsyncDisposableRegistry) asyncDisposables: IAsyncDisposableRegistry,
         @inject(IDisposableRegistry) disposables: IDisposableRegistry,
-        @inject(INotebookProvider) private notebookProvider: INotebookProvider,
+        @inject(IKernelSessionFactory) private sessionCreator: IKernelSessionFactory,
         @inject(IConfigurationService) private configService: IConfigurationService,
-        @inject(IApplicationShell) private readonly appShell: IApplicationShell,
-        @inject(IVSCodeNotebook) notebook: IVSCodeNotebook,
-        @multiInject(IStartupCodeProvider) private readonly startupCodeProviders: IStartupCodeProvider[]
+        @inject(IStartupCodeProviders) private readonly startupCodeProviders: IStartupCodeProviders,
+        @inject(IMemento) @named(WORKSPACE_MEMENTO) private readonly workspaceStorage: Memento
     ) {
-        super(asyncDisposables, disposables, notebook);
+        super(asyncDisposables, disposables);
     }
 
     public getOrCreate(uri: Uri, options: ThirdPartyKernelOptions): IThirdPartyKernel {
-        // const notebook = this.
         const existingKernelInfo = this.getInternal(uri);
         if (existingKernelInfo && existingKernelInfo.options.metadata.id === options.metadata.id) {
             return existingKernelInfo.kernel;
@@ -119,14 +133,15 @@ export class ThirdPartyKernelProvider extends BaseThirdPartyKernelProvider {
 
         const resourceUri = uri;
         const settings = createKernelSettings(this.configService, resourceUri);
+        const notebookType = resourceUri.path.endsWith('.interactive') ? InteractiveWindowView : JupyterNotebookView;
         const kernel: IThirdPartyKernel = new ThirdPartyKernel(
             uri,
             resourceUri,
             options.metadata,
-            this.notebookProvider,
-            this.appShell,
+            this.sessionCreator,
             settings,
-            this.startupCodeProviders
+            this.startupCodeProviders.getProviders(notebookType),
+            this.workspaceStorage
         );
         kernel.onRestarted(() => this._onDidRestartKernel.fire(kernel), this, this.disposables);
         kernel.onDisposed(
@@ -139,6 +154,11 @@ export class ThirdPartyKernelProvider extends BaseThirdPartyKernelProvider {
         kernel.onStarted(() => this._onDidStartKernel.fire(kernel), this, this.disposables);
         kernel.onStatusChanged(
             (status) => this._onKernelStatusChanged.fire({ kernel, status }),
+            this,
+            this.disposables
+        );
+        kernel.onPostInitialized(
+            (e) => e.waitUntil(this._onDidPostInitializeKernel.fireAsync({ kernel }, e.token)),
             this,
             this.disposables
         );

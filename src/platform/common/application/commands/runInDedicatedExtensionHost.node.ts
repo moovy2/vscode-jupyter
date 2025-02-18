@@ -1,29 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { inject, injectable } from 'inversify';
-import { ConfigurationTarget, extensions } from 'vscode';
-import { IExtensionSingleActivationService } from '../../../activation/types';
+import { injectable } from 'inversify';
+import { ConfigurationTarget, commands, extensions } from 'vscode';
+import { IExtensionSyncActivationService } from '../../../activation/types';
 import { PythonExtension, PylanceExtension } from '../../constants';
 import { noop } from '../../utils/misc';
-import { ICommandManager, IWorkspaceService } from '../types';
+import { workspace } from 'vscode';
 
 /**
  * Allows the jupyter extension to run in a different process than other extensions.
  */
 @injectable()
-export class RunInDedicatedExtensionHostCommandHandler implements IExtensionSingleActivationService {
-    constructor(
-        @inject(ICommandManager) private readonly commandManager: ICommandManager,
-        @inject(IWorkspaceService) private readonly workspaceService: IWorkspaceService
-    ) {}
-    public async activate(): Promise<void> {
-        this.commandManager.registerCommand('jupyter.runInDedicatedExtensionHost', this.updateAffinity, this);
+export class RunInDedicatedExtensionHostCommandHandler implements IExtensionSyncActivationService {
+    public activate() {
+        commands.registerCommand('jupyter.runInDedicatedExtensionHost', this.updateAffinity, this);
     }
     private async updateAffinity() {
-        const affinity = this.workspaceService.getConfiguration('extensions').get('experimental.affinity') as
+        const affinity = workspace.getConfiguration('extensions').get('experimental.affinity') as
             | { [key: string]: number }
             | undefined;
         let maxAffinity = 0;
@@ -48,7 +42,7 @@ export class RunInDedicatedExtensionHostCommandHandler implements IExtensionSing
             update[PylanceExtension] = targetAffinity;
         }
 
-        await this.workspaceService.getConfiguration('extensions').update(
+        await workspace.getConfiguration('extensions').update(
             'experimental.affinity',
             {
                 ...(affinity ?? {}),
@@ -57,6 +51,6 @@ export class RunInDedicatedExtensionHostCommandHandler implements IExtensionSing
             ConfigurationTarget.Global
         );
 
-        this.commandManager.executeCommand('workbench.action.reloadWindow').then(noop, noop);
+        commands.executeCommand('workbench.action.reloadWindow').then(noop, noop);
     }
 }

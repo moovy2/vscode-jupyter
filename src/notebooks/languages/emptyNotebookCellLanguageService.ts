@@ -2,16 +2,15 @@
 // Licensed under the MIT License.
 
 import { inject, injectable } from 'inversify';
-import { languages, NotebookCellKind, NotebookDocument } from 'vscode';
-import { IExtensionSingleActivationService } from '../../platform/activation/types';
-import { IVSCodeNotebook } from '../../platform/common/application/types';
+import { languages, NotebookCellKind, NotebookDocument, window } from 'vscode';
+import { IExtensionSyncActivationService } from '../../platform/activation/types';
 import { PYTHON_LANGUAGE } from '../../platform/common/constants';
-import { traceError } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { IDisposableRegistry } from '../../platform/common/types';
 import { noop } from '../../platform/common/utils/misc';
 import { chainWithPendingUpdates } from '../../kernels/execution/notebookUpdater';
 import { isJupyterNotebook, translateKernelLanguageToMonaco } from '../../platform/common/utils';
-import { IControllerSelection, IVSCodeNotebookController } from '../controllers/types';
+import { IControllerRegistration, IVSCodeNotebookController } from '../controllers/types';
 /**
  * If user creates a blank notebook, then they'll mostl likely end up with a blank cell with language, lets assume `Python`.
  * Now if the user changes the kernel to say `Julia`. After this, they need to also change the language of the cell.
@@ -20,18 +19,13 @@ import { IControllerSelection, IVSCodeNotebookController } from '../controllers/
  * This logic is applied only when all code cells in the notebook are empty.
  */
 @injectable()
-export class EmptyNotebookCellLanguageService implements IExtensionSingleActivationService {
+export class EmptyNotebookCellLanguageService implements IExtensionSyncActivationService {
     constructor(
-        @inject(IVSCodeNotebook) private readonly notebook: IVSCodeNotebook,
         @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry,
-        @inject(IControllerSelection) private readonly notebookControllerSelection: IControllerSelection
+        @inject(IControllerRegistration) private readonly controllerRegistration: IControllerRegistration
     ) {}
-    public async activate(): Promise<void> {
-        this.notebookControllerSelection.onControllerSelected(
-            this.onDidChangeNotebookController,
-            this,
-            this.disposables
-        );
+    public activate() {
+        this.controllerRegistration.onControllerSelected(this.onDidChangeNotebookController, this, this.disposables);
     }
 
     private async onDidChangeNotebookController(event: {
@@ -44,7 +38,7 @@ export class EmptyNotebookCellLanguageService implements IExtensionSingleActivat
         if (!isJupyterNotebook(document)) {
             return;
         }
-        const editor = this.notebook.notebookEditors.find((item) => item.notebook === document);
+        const editor = window.visibleNotebookEditors.find((item) => item.notebook === document);
         if (!editor) {
             return;
         }
@@ -75,7 +69,7 @@ export class EmptyNotebookCellLanguageService implements IExtensionSingleActivat
                 break;
             }
             default: {
-                traceError(`Unsupported kernel kind encountered ${kernelKind}`);
+                logger.error(`Unsupported kernel kind encountered ${kernelKind}`);
                 return;
             }
         }

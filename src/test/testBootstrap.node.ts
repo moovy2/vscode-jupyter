@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { ChildProcess, spawn, SpawnOptions } from 'child_process';
 import * as fs from 'fs-extra';
 import { AddressInfo, createServer, Server } from 'net';
@@ -51,16 +49,13 @@ async function deletePortFile() {
     }
 }
 async function end(exitCode: number) {
-    if (exitCode === 0) {
-        console.log('Exiting without errors');
-    } else {
+    if (exitCode !== 0) {
         console.error('Exiting with test failures');
     }
     if (proc) {
         try {
             const procToKill = proc;
             proc = undefined;
-            console.log('Killing VSC');
             await deletePortFile();
             // Wait for the std buffers to get flushed before killing.
             await sleep(5_000);
@@ -78,7 +73,6 @@ async function end(exitCode: number) {
 
 async function startSocketServer() {
     return new Promise<void>((resolve) => {
-        console.log(`Creating test server`);
         server = createServer((socket) => {
             socket.on('data', (buffer) => {
                 const data = buffer.toString('utf8');
@@ -95,10 +89,8 @@ async function startSocketServer() {
             // Just log it, no need to do anything else.
             console.error(ex);
         });
-        console.log(`Listening to test server`);
         server.listen({ host: '127.0.0.1', port: 0 }, async () => {
             const port = (server!.address() as AddressInfo).port;
-            console.log(`Test server listening on port ${port}`);
             await deletePortFile();
             await fs.writeFile(portFile, port.toString());
             resolve();
@@ -108,15 +100,9 @@ async function startSocketServer() {
 }
 
 async function start() {
-    console.log('Starting socket server for tests.');
     await startSocketServer();
     const options: SpawnOptions = { cwd: process.cwd(), env: process.env, detached: false, stdio: 'inherit' };
-    console.log(`Spawning ${process.execPath} : ${testFile}`);
     proc = spawn(process.execPath, [testFile], options);
-    proc.on('data', (d) => {
-        const str = d.toString();
-        console.log(str);
-    });
     proc.once('close', end);
 }
 

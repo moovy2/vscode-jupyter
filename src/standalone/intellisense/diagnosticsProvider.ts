@@ -26,20 +26,20 @@ import {
     workspace
 } from 'vscode';
 import { IExtensionSyncActivationService } from '../../platform/activation/types';
-import { IVSCodeNotebook, IDocumentManager } from '../../platform/common/application/types';
 import { PYTHON_LANGUAGE } from '../../platform/common/constants';
-import { disposeAllDisposables } from '../../platform/common/helpers';
+import { dispose } from '../../platform/common/utils/lifecycle';
 import { IDisposable, IDisposableRegistry } from '../../platform/common/types';
 import { DataScience } from '../../platform/common/utils/localize';
 import { JupyterNotebookView } from '../../platform/common/constants';
 import { getAssociatedJupyterNotebook } from '../../platform/common/utils';
+import { Delayer } from '../../platform/common/utils/async';
 
 type CellUri = string;
 type CellVersion = number;
 
-const pipMessage = DataScience.percentPipCondaInstallInsteadOfBang().format('pip');
-const condaMessage = DataScience.percentPipCondaInstallInsteadOfBang().format('conda');
-const matplotlibMessage = DataScience.matplotlibWidgetInsteadOfOther();
+const pipMessage = DataScience.percentPipCondaInstallInsteadOfBang('pip');
+const condaMessage = DataScience.percentPipCondaInstallInsteadOfBang('conda');
+const matplotlibMessage = DataScience.matplotlibWidgetInsteadOfOther;
 const diagnosticSource = 'Jupyter';
 
 /**
@@ -53,23 +53,19 @@ export class NotebookCellBangInstallDiagnosticsProvider
     private readonly disposables: IDisposable[] = [];
     private readonly notebooksProcessed = new WeakMap<NotebookDocument, Map<CellUri, CellVersion>>();
     private readonly cellsToProcess = new Set<NotebookCell>();
-    constructor(
-        @inject(IVSCodeNotebook) private readonly notebooks: IVSCodeNotebook,
-        @inject(IDisposableRegistry) disposables: IDisposableRegistry,
-        @inject(IDocumentManager) private readonly documents: IDocumentManager
-    ) {
+    constructor(@inject(IDisposableRegistry) disposables: IDisposableRegistry) {
         this.problems = languages.createDiagnosticCollection(diagnosticSource);
         this.disposables.push(this.problems);
         disposables.push(this);
     }
     public dispose() {
-        disposeAllDisposables(this.disposables);
+        dispose(this.disposables);
         this.problems.dispose();
     }
     public activate(): void {
         this.disposables.push(languages.registerCodeActionsProvider(PYTHON_LANGUAGE, this));
         this.disposables.push(languages.registerHoverProvider(PYTHON_LANGUAGE, this));
-        this.documents.onDidChangeTextDocument(
+        workspace.onDidChangeTextDocument(
             (e) => {
                 const notebook = getAssociatedJupyterNotebook(e.document);
                 if (!notebook) {
@@ -83,7 +79,7 @@ export class NotebookCellBangInstallDiagnosticsProvider
             this,
             this.disposables
         );
-        this.notebooks.onDidCloseNotebookDocument(
+        workspace.onDidCloseNotebookDocument(
             (e) => {
                 this.problems.delete(e.uri);
                 const cells = this.notebooksProcessed.get(e);
@@ -97,22 +93,26 @@ export class NotebookCellBangInstallDiagnosticsProvider
             this.disposables
         );
 
-        this.notebooks.onDidOpenNotebookDocument((e) => this.analyzeNotebook(e), this, this.disposables);
+        workspace.onDidOpenNotebookDocument((e) => this.analyzeNotebook(e), this, this.disposables);
+        const delayer = new Delayer<void>(300);
+        this.disposables.push(delayer);
         workspace.onDidChangeNotebookDocument(
             (e) => {
-                const cells = this.notebooksProcessed.get(e.notebook);
-                e.contentChanges.forEach((change) => {
-                    change.removedCells.forEach((cell) => {
-                        cells?.delete(cell.document.uri.toString());
+                void delayer.trigger(() => {
+                    const cells = this.notebooksProcessed.get(e.notebook);
+                    e.contentChanges.forEach((change) => {
+                        change.removedCells.forEach((cell) => {
+                            cells?.delete(cell.document.uri.toString());
+                        });
+                        change.addedCells.forEach((cell) => this.queueCellForProcessing(cell));
                     });
-                    change.addedCells.forEach((cell) => this.queueCellForProcessing(cell));
+                    e.cellChanges.forEach((change) => this.queueCellForProcessing(change.cell));
                 });
-                e.cellChanges.forEach((change) => this.queueCellForProcessing(change.cell));
             },
             this,
             this.disposables
         );
-        this.notebooks.notebookDocuments.map((e) => this.analyzeNotebook(e));
+        workspace.notebookDocuments.map((e) => this.analyzeNotebook(e));
     }
     public provideHover(document: TextDocument, position: Position, _token: CancellationToken) {
         const notebook = getAssociatedJupyterNotebook(document);
@@ -129,7 +129,7 @@ export class NotebookCellBangInstallDiagnosticsProvider
         }
         const installer = diagnostic.message === pipMessage ? 'pip' : 'conda';
         return new Hover(
-            DataScience.pipCondaInstallHoverWarning().format(installer, 'https://aka.ms/jupyterCellMagicBangInstall'),
+            DataScience.pipCondaInstallHoverWarning(installer, 'https://aka.ms/jupyterCellMagicBangInstall'),
             diagnostic.range
         );
     }
@@ -169,11 +169,8 @@ export class NotebookCellBangInstallDiagnosticsProvider
         });
         return codeActions;
     }
-    private createReplaceCodeAction(document: TextDocument, type: string, d: Diagnostic) {
-        const codeAction = new CodeAction(
-            DataScience.replacePipCondaInstallCodeAction().format(type),
-            CodeActionKind.QuickFix
-        );
+    private createReplaceCodeAction(document: TextDocument, type: 'pip' | 'conda', d: Diagnostic) {
+        const codeAction = new CodeAction(DataScience.replacePipCondaInstallCodeAction(type), CodeActionKind.QuickFix);
         codeAction.isPreferred = true;
         codeAction.diagnostics = [d];
         const edit = new WorkspaceEdit();
@@ -186,11 +183,11 @@ export class NotebookCellBangInstallDiagnosticsProvider
         return codeAction;
     }
     private createGotoWikiAction(_document: TextDocument, uri: Uri, d: Diagnostic) {
-        const codeAction = new CodeAction(DataScience.matplotlibWidgetCodeActionTitle(), CodeActionKind.QuickFix);
+        const codeAction = new CodeAction(DataScience.matplotlibWidgetCodeActionTitle, CodeActionKind.QuickFix);
         codeAction.isPreferred = true;
         codeAction.diagnostics = [d];
         codeAction.command = {
-            title: DataScience.matplotlibWidgetCodeActionTitle(),
+            title: DataScience.matplotlibWidgetCodeActionTitle,
             command: 'vscode.open',
             arguments: [uri]
         };
@@ -213,8 +210,10 @@ export class NotebookCellBangInstallDiagnosticsProvider
             return;
         }
         const cell = this.cellsToProcess.values().next().value;
-        this.cellsToProcess.delete(cell);
-        this.analyzeNotebookCell(cell);
+        if (cell) {
+            this.cellsToProcess.delete(cell);
+            this.analyzeNotebookCell(cell);
+        }
         // Schedule processing of next cell (this way we dont chew CPU and block the UI).
         setTimeout(() => this.analyzeNotebookCells(), 0);
     }

@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { injectable } from 'inversify';
 import {
     Breakpoint,
@@ -16,7 +14,7 @@ import {
     Event,
     WorkspaceFolder
 } from 'vscode';
-import { traceInfoIfCI } from '../../logging';
+import { logger } from '../../logging';
 import { IDebugService } from './types';
 
 /**
@@ -29,7 +27,7 @@ export class DebugService implements IDebugService {
         return debug.activeDebugConsole;
     }
     public get activeDebugSession(): DebugSession | undefined {
-        traceInfoIfCI(`Getting active debug session, ${debug.activeDebugSession?.name}`);
+        logger.ci(`Getting active debug session, ${debug.activeDebugSession?.name}`);
         return debug.activeDebugSession;
     }
     public get breakpoints(): readonly Breakpoint[] {

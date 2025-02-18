@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import './mainPanel.css';
 
 import * as React from 'react';
@@ -143,11 +142,6 @@ export class MainPanel extends React.Component<IMainPanelProps, IMainPanelState>
     }
 
     private computeBaseTheme(): string {
-        // If we're ignoring, always light
-        if (this.state.settings?.ignoreVscodeTheme) {
-            return 'vscode-light';
-        }
-
         return this.props.baseTheme;
     }
 

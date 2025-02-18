@@ -1,11 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-require-imports */
-
-import '../extensions';
 
 type CacheData = {
     value: unknown;
@@ -14,7 +10,10 @@ type CacheData = {
 const resourceSpecificCacheStores = new Map<string, Map<string, CacheData>>();
 export class DataWithExpiry {
     private readonly expiryTime: number;
-    constructor(expiryDuration: number, private _data: any) {
+    constructor(
+        expiryDuration: number,
+        private _data: any
+    ) {
         this.expiryTime = expiryDuration + Date.now();
     }
     public get expired() {
@@ -53,7 +52,10 @@ export function clearCache() {
 }
 
 export class InMemoryCache<T> {
-    constructor(private readonly expiryDurationMs: number, private readonly cacheKey: string = '') {}
+    constructor(
+        private readonly expiryDurationMs: number,
+        private readonly cacheKey: string = ''
+    ) {}
     public get hasData() {
         const store = globalCacheStore.get(this.cacheKey);
         return store && !store.expired ? true : false;

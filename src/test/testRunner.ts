@@ -5,11 +5,10 @@
 /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires, , , @typescript-eslint/no-explicit-any, prefer-template, no-console */
 // Most of the source is in node_modules/vscode/lib/testrunner.js
 
-'use strict';
 import glob from 'glob';
 import Mocha from 'mocha';
 import * as path from '../platform/vscode-path/path';
-import { IS_SMOKE_TEST, MAX_EXTENSION_ACTIVATION_TIME } from './constants.node';
+import { MAX_EXTENSION_ACTIVATION_TIME } from './constants.node';
 import { noop } from './core';
 import { stopJupyterServer } from './datascience/notebook/helper.node';
 import { initialize } from './initialize.node';
@@ -52,13 +51,6 @@ export async function run(): Promise<void> {
     // Enable source map support.
     require('source-map-support').install();
 
-    // nteract/transforms-full expects to run in the browser so we have to fake
-    // parts of the browser here.
-    if (!IS_SMOKE_TEST()) {
-        const reactHelpers = require('./datascience/reactHelpers') as typeof import('./datascience/reactHelpers');
-        reactHelpers.setUpDomEnvironment();
-    }
-
     /**
      * Waits until the Python Extension completes loading or a timeout.
      * When running tests within VSC, we need to wait for the Python Extension to complete loading,
@@ -75,34 +67,30 @@ export async function run(): Promise<void> {
             timer = setTimeout(() => reject(ex), MAX_EXTENSION_ACTIVATION_TIME);
         });
         const promise = Promise.race([initialize(), failed]);
-        promise.then(() => clearTimeout(timer!)).catch(() => clearTimeout(timer!));
+        promise.then(() => clearTimeout(timer! as any)).catch(() => clearTimeout(timer! as any));
         return promise;
     }
     // Run the tests.
     await new Promise<void>((resolve, reject) => {
-        glob(
-            `**/**.${testFilesGlob}.js`,
-            { ignore: ['**/**.unit.test.js', '**/**.functional.test.js'], cwd: testsRoot },
-            (error, files) => {
-                if (error) {
-                    return reject(error);
-                }
-                try {
-                    files.forEach((file) => mocha.addFile(path.join(testsRoot, file)));
-                    initializationScript()
-                        .then(() =>
-                            mocha.run((failures) =>
-                                failures > 0 ? reject(new Error(`${failures} total failures`)) : resolve()
-                            )
-                        )
-                        .finally(() => {
-                            stopJupyterServer().catch(noop);
-                        })
-                        .catch(reject);
-                } catch (error) {
-                    return reject(error);
-                }
+        glob(`**/**.${testFilesGlob}.js`, { ignore: ['**/**.unit.test.js'], cwd: testsRoot }, (error, files) => {
+            if (error) {
+                return reject(error);
             }
-        );
+            try {
+                files.forEach((file) => mocha.addFile(path.join(testsRoot, file)));
+                initializationScript()
+                    .then(() =>
+                        mocha.run((failures) =>
+                            failures > 0 ? reject(new Error(`${failures} total failures`)) : resolve()
+                        )
+                    )
+                    .finally(() => {
+                        stopJupyterServer().catch(noop);
+                    })
+                    .catch(reject);
+            } catch (error) {
+                return reject(error);
+            }
+        });
     });
 }

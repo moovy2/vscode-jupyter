@@ -5,14 +5,11 @@ import { IJupyterRequestCreator } from '../types';
 import * as nodeFetch from 'node-fetch';
 import { ClassType } from '../../../platform/ioc/types';
 import WebSocketIsomorphic from 'isomorphic-ws';
-import { traceError } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { noop } from '../../../platform/common/utils/misc';
 import { KernelSocketWrapper } from '../../common/kernelSocketWrapper';
-import { IKernelSocket } from '../../types';
 import { injectable } from 'inversify';
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
-const JupyterWebSockets = new Map<string, WebSocketIsomorphic & IKernelSocket>(); // NOSONAR
+import { KernelSocketMap } from '../../kernelSocket';
 
 // Function for creating node Request object that prevents jupyterlab services from writing its own
 // authorization header.
@@ -42,41 +39,45 @@ export class JupyterRequestCreator implements IJupyterRequestCreator {
             }
         }
 
-        return (getAuthHeader ? AuthorizingRequest : nodeFetch.Request) as any;
+        return (
+            getAuthHeader && Object.keys(getAuthHeader() || {}).length ? AuthorizingRequest : nodeFetch.Request
+        ) as any;
     }
 
     public getWebsocketCtor(
         cookieString?: string,
         allowUnauthorized?: boolean,
-        getAuthHeaders?: () => any
+        getAuthHeaders?: () => Record<string, string>
     ): ClassType<WebSocket> {
+        const generateOptions = (): WebSocketIsomorphic.ClientOptions => {
+            let co: WebSocketIsomorphic.ClientOptions = {};
+            let co_headers: { [key: string]: string } | undefined;
+
+            if (allowUnauthorized) {
+                co = { ...co, rejectUnauthorized: false };
+            }
+
+            if (cookieString) {
+                co_headers = { Cookie: cookieString };
+            }
+
+            // Auth headers have to be refetched every time we create a connection. They may have expired
+            // since the last connection.
+            if (getAuthHeaders) {
+                const authorizationHeader = getAuthHeaders();
+                co_headers = co_headers ? { ...co_headers, ...authorizationHeader } : authorizationHeader;
+            }
+            if (co_headers) {
+                co = { ...co, headers: co_headers };
+            }
+            return co;
+        };
         class JupyterWebSocket extends KernelSocketWrapper(WebSocketIsomorphic) {
             private kernelId: string | undefined;
             private timer: NodeJS.Timeout | number;
 
             constructor(url: string, protocols?: string | string[] | undefined) {
-                let co: WebSocketIsomorphic.ClientOptions = {};
-                let co_headers: { [key: string]: string } | undefined;
-
-                if (allowUnauthorized) {
-                    co = { ...co, rejectUnauthorized: false };
-                }
-
-                if (cookieString) {
-                    co_headers = { Cookie: cookieString };
-                }
-
-                // Auth headers have to be refetched every time we create a connection. They may have expired
-                // since the last connection.
-                if (getAuthHeaders) {
-                    const authorizationHeader = getAuthHeaders();
-                    co_headers = co_headers ? { ...co_headers, ...authorizationHeader } : authorizationHeader;
-                }
-                if (co_headers) {
-                    co = { ...co, headers: co_headers };
-                }
-
-                super(url, protocols, co);
+                super(url, protocols, generateOptions());
                 let timer: NodeJS.Timeout | undefined = undefined;
                 // Parse the url for the kernel id
                 const parsed = /.*\/kernels\/(.*)\/.*/.exec(url);
@@ -84,17 +85,17 @@ export class JupyterRequestCreator implements IJupyterRequestCreator {
                     this.kernelId = parsed[1];
                 }
                 if (this.kernelId) {
-                    JupyterWebSockets.set(this.kernelId, this);
+                    KernelSocketMap.set(this.kernelId, this);
                     this.on('close', () => {
                         if (timer && this.timer !== timer) {
                             clearInterval(timer as any);
                         }
-                        if (JupyterWebSockets.get(this.kernelId!) === this) {
-                            JupyterWebSockets.delete(this.kernelId!);
+                        if (KernelSocketMap.get(this.kernelId!) === this) {
+                            KernelSocketMap.delete(this.kernelId!);
                         }
                     });
                 } else {
-                    traceError('KernelId not extracted from Kernel WebSocket URL');
+                    logger.error('KernelId not extracted from Kernel WebSocket URL');
                 }
 
                 // Ping the websocket connection every 30 seconds to make sure it stays alive
@@ -103,9 +104,38 @@ export class JupyterRequestCreator implements IJupyterRequestCreator {
         }
         return JupyterWebSocket as any;
     }
+    public wrapWebSocketCtor(websocketCtor: ClassType<WebSocketIsomorphic>): ClassType<WebSocketIsomorphic> {
+        class JupyterWebSocket extends KernelSocketWrapper(websocketCtor) {
+            private kernelId: string | undefined;
+            private timer: NodeJS.Timeout | number;
 
-    public getWebsocket(id: string): IKernelSocket | undefined {
-        return JupyterWebSockets.get(id);
+            constructor(url: string, protocols?: string | string[] | undefined, options?: unknown) {
+                super(url, protocols, options);
+                let timer: NodeJS.Timeout | undefined = undefined;
+                // Parse the url for the kernel id
+                const parsed = /.*\/kernels\/(.*)\/.*/.exec(url);
+                if (parsed && parsed.length > 1) {
+                    this.kernelId = parsed[1];
+                }
+                if (this.kernelId) {
+                    KernelSocketMap.set(this.kernelId, this);
+                    this.on('close', () => {
+                        if (timer && this.timer !== timer) {
+                            clearInterval(timer as any);
+                        }
+                        if (KernelSocketMap.get(this.kernelId!) === this) {
+                            KernelSocketMap.delete(this.kernelId!);
+                        }
+                    });
+                } else {
+                    logger.error('KernelId not extracted from Kernel WebSocket URL');
+                }
+
+                // Ping the websocket connection every 30 seconds to make sure it stays alive
+                timer = this.timer = setInterval(() => this.ping(noop), 30_000);
+            }
+        }
+        return JupyterWebSocket as any;
     }
 
     public getFetchMethod(): (input: RequestInfo, init?: RequestInit) => Promise<Response> {

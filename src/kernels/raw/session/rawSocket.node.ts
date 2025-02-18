@@ -1,19 +1,19 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { IDisposable } from '@fluentui/react';
 import type { KernelMessage } from '@jupyterlab/services';
 import * as wireProtocol from '@nteract/messaging/lib/wire-protocol';
 import uuid from 'uuid/v4';
-import * as WebSocketWS from 'ws';
+import type * as WebSocketWS from 'ws';
 import type { Dealer, Subscriber } from 'zeromq';
-import { traceError } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { noop } from '../../../platform/common/utils/misc';
 import { IWebSocketLike } from '../../common/kernelSocketWrapper';
 import { IKernelSocket } from '../../types';
 import { IKernelConnection } from '../types';
 import type { Channel } from '@jupyterlab/services/lib/kernel/messages';
-import { EventEmitter } from 'vscode';
+import { getZeroMQ } from './zeromq.node';
+import type { IDisposable } from '../../../platform/common/types';
 
 function formConnectionString(config: IKernelConnection, channel: string) {
     const portDelimiter = config.transport === 'tcp' ? ':' : '-';
@@ -36,8 +36,6 @@ interface IChannels {
  * it does all serialization/deserialization itself.
  */
 export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
-    private _onAnyMessage = new EventEmitter<{ msg: string; direction: 'send' }>();
-    public onAnyMessage = this._onAnyMessage.event;
     public onopen: (event: { target: any }) => void = noop;
     public onerror: (event: { error: any; message: string; type: string; target: any }) => void = noop;
     public onclose: (event: { wasClean: boolean; code: number; reason: string; target: any }) => void = noop;
@@ -48,11 +46,14 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
     private sendChain: Promise<any> = Promise.resolve();
     private channels: IChannels;
     private closed = false;
-
+    /**
+     * Used to configure the protocol for WebSocket messages in Jupyter Lab.
+     * Empty string means no protocol (old behavior, this is simpler for raw sockets as we just want to serialize to JSON and back).
+     */
+    public readonly protocol = '';
     constructor(
         private connection: IKernelConnection,
-        private serialize: (msg: KernelMessage.IMessage) => string | ArrayBuffer,
-        private deserialize: (data: ArrayBuffer | string) => KernelMessage.IMessage
+        private serialize: (msg: KernelMessage.IMessage) => string | ArrayBuffer
     ) {
         // Setup our ZMQ channels now
         this.channels = this.generateChannels(connection);
@@ -72,7 +73,7 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
             try {
                 closable.close();
             } catch (ex) {
-                traceError(`Error during socket shutdown`, ex);
+                logger.error(`Error during socket shutdown`, ex);
             }
         };
         closer(this.channels.control);
@@ -100,18 +101,6 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
         }
         return true;
     }
-    public sendToRealKernel(data: any, _callback: any): void {
-        // If from ipywidgets, this will be serialized already, so turn it back into a message so
-        // we can add the special hash to it.
-        const message = this.deserialize(data);
-        // These messages are sent directly to the kernel bypassing the Jupyter lab npm libraries.
-        // As a result, we don't get any notification that messages were sent (on the anymessage signal).
-        // To ensure those signals can still be used to monitor such messages, send them via a callback so that we can emit these messages on the anymessage signal.
-        this._onAnyMessage.fire({ msg: data, direction: 'send' });
-        // Send this directly (don't call back into the hooks)
-        this.sendMessage(message, true);
-    }
-
     public send(data: any, _callback: any): void {
         // This comes directly from the jupyter lab kernel. It should be a message already
         this.sendMessage(data as KernelMessage.IMessage, false);
@@ -138,8 +127,8 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
     ): T {
         const result = ctor();
         result.connect(formConnectionString(connection, channel));
-        this.processSocketMessages(channel, result).catch(
-            traceError.bind(`Failed to read messages from channel ${channel}`)
+        this.processSocketMessages(channel, result).catch((ex) =>
+            logger.error(`Failed to read messages from channel ${channel}`, ex)
         );
         return result;
     }
@@ -157,7 +146,7 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
 
     private generateChannels(connection: IKernelConnection): IChannels {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const zmq = require('zeromq') as typeof import('zeromq');
+        const zmq = getZeroMQ();
 
         // Need a routing id for them to share.
         const routingId = uuid();
@@ -257,7 +246,7 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
                 this.onmessage({ data: message as any, type: 'message', target: this });
             } catch (ex) {
                 // Swallow this error, so that other messages get processed.
-                traceError(`Failed to handle message in Jupyter Kernel package ${JSON.stringify(message)}`, ex);
+                logger.error(`Failed to handle message in Jupyter Kernel package ${JSON.stringify(message)}`, ex);
             }
         }
     }
@@ -273,7 +262,17 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
 
             this.sendChain = this.sendChain
                 .then(() => Promise.all(this.sendHooks.map((s) => s(hookData, noop))))
-                .then(() => this.postToSocket(msg.channel, data));
+                .then(async () => {
+                    try {
+                        await this.postToSocket(msg.channel, data);
+                    } catch (ex) {
+                        logger.error(`Failed to write data to the kernel channel ${msg.channel}`, data, ex);
+                        // No point throwing this error, as that would mean nothing else works from here on end.
+                        // Lets ignore this error but log it and then continue
+                        // Hopefully users will file bugs and we can fix this (based on the error message).
+                        // throw ex;
+                    }
+                });
         } else {
             this.sendChain = this.sendChain.then(() => {
                 this.postToSocket(msg.channel, data);
@@ -287,10 +286,10 @@ export class RawSocket implements IWebSocketLike, IKernelSocket, IDisposable {
         const socket = (this.channels as any)[channel];
         if (socket) {
             (socket as Dealer).send(data).catch((exc) => {
-                traceError(`Error communicating with the kernel`, exc);
+                logger.error(`Error communicating with the kernel`, exc);
             });
         } else {
-            traceError(`Attempting to send message on invalid channel: ${channel}`);
+            logger.error(`Attempting to send message on invalid channel: ${channel}`);
         }
     }
 }

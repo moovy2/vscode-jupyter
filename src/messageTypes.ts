@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import { Uri } from 'vscode';
 import type { KernelMessage } from '@jupyterlab/services';
 import {
@@ -9,7 +8,6 @@ import {
 } from './webviews/webview-side/interactive-common/redux/reducers/types';
 // eslint-disable-next-line
 import { KernelSocketOptions } from './kernels/types';
-import { ICell } from './platform/common/types';
 import { IJupyterVariable, IJupyterVariablesRequest, IJupyterVariablesResponse } from './kernels/variables/types';
 import { WidgetScriptSource } from './notebooks/controllers/ipywidgets/types';
 
@@ -22,7 +20,6 @@ export interface ILoadIPyWidgetClassFailureAction {
     className: string;
     moduleName: string;
     moduleVersion: string;
-    cdnsUsed: boolean;
     isOnline: boolean;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     error: any;
@@ -36,7 +33,6 @@ export type LoadIPyWidgetClassLoadAction = {
 };
 
 export enum InteractiveWindowMessages {
-    FinishCell = 'finish_cell',
     RestartKernel = 'restart_kernel',
     SettingsUpdated = 'settings_updated',
     Started = 'started',
@@ -64,11 +60,15 @@ export enum InteractiveWindowMessages {
 }
 
 export enum IPyWidgetMessages {
+    IPyWidgets_Window_Alert = 'IPyWidgets_Window_Alert',
+    IPyWidgets_Window_Open = 'IPyWidgets_Window_Open',
     IPyWidgets_logMessage = 'IPyWidgets_logMessage',
     IPyWidgets_IsReadyRequest = 'IPyWidgets_IsReadyRequest',
     IPyWidgets_AttemptToDownloadFailedWidgetsAgain = 'IPyWidgets_AttemptToDownloadFailedWidgetsAgain',
     IPyWidgets_IsOnline = 'IPyWidgets_IsOnline',
     IPyWidgets_Ready = 'IPyWidgets_Ready',
+    IPyWidgets_Request_Widget_Version = 'IPyWidgets_Request_Widget_Version',
+    IPyWidgets_Reply_Widget_Version = 'IPyWidgets_Reply_Widget_Version',
     IPyWidgets_onRestartKernel = 'IPyWidgets_onRestartKernel',
     IPyWidgets_onKernelChanged = 'IPyWidgets_onKernelChanged',
     /**
@@ -102,10 +102,6 @@ export enum SysInfoReason {
     Restart
 }
 
-export interface IFinishCell {
-    cell: ICell;
-}
-
 export interface IShowDataViewer {
     variable: IJupyterVariable;
     columnSize: number;
@@ -124,6 +120,45 @@ export enum SharedMessages {
     LocInit = 'loc_init'
 }
 
+export type LocalizedMessages = {
+    collapseSingle: string;
+    expandSingle: string;
+    openExportFileYes: string;
+    openExportFileNo: string;
+    noRowsInDataViewer: string;
+    sliceIndexError: string;
+    sliceMismatchedAxesError: string;
+    filterRowsTooltip: string;
+    fetchingDataViewer: string;
+    dataViewerHideFilters: string;
+    dataViewerShowFilters: string;
+    refreshDataViewer: string;
+    clearFilters: string;
+    sliceSummaryTitle: string;
+    sliceData: string;
+    sliceSubmitButton: string;
+    sliceDropdownAxisLabel: string;
+    sliceDropdownIndexLabel: string;
+    variableExplorerNameColumn: string;
+    variableExplorerTypeColumn: string;
+    variableExplorerCountColumn: string;
+    variableExplorerValueColumn: string;
+    collapseVariableExplorerLabel: string;
+    variableLoadingValue: string;
+    showDataExplorerTooltip: string;
+    noRowsInVariableExplorer: string;
+    loadingRowsInVariableExplorer: string;
+    previousPlot: string;
+    nextPlot: string;
+    panPlot: string;
+    zoomInPlot: string;
+    zoomOutPlot: string;
+    exportPlot: string;
+    deletePlot: string;
+    selectedImageListLabel: string;
+    selectedImageLabel: string;
+    dvDeprecationWarning: string;
+};
 // Map all messages to specific payloads
 export class IInteractiveWindowMapping {
     public [IPyWidgetMessages.IPyWidgets_kernelOptions]: KernelSocketOptions;
@@ -163,7 +198,6 @@ export class IInteractiveWindowMapping {
     public [IPyWidgetMessages.IPyWidgets_mirror_execute]: { id: string; msg: KernelMessage.IExecuteRequestMsg };
     public [InteractiveWindowMessages.ForceVariableRefresh]: never | undefined;
     public [InteractiveWindowMessages.UpdateVariableViewExecutionCount]: { executionCount: number };
-    public [InteractiveWindowMessages.FinishCell]: IFinishCell;
     public [InteractiveWindowMessages.RestartKernel]: never | undefined;
     public [InteractiveWindowMessages.SettingsUpdated]: string;
     public [InteractiveWindowMessages.Started]: never | undefined;
@@ -189,3 +223,11 @@ export class IInteractiveWindowMapping {
     public [InteractiveWindowMessages.GetHTMLByIdRequest]: string;
     public [InteractiveWindowMessages.GetHTMLByIdResponse]: string;
 }
+
+export const enum ErrorRendererMessageType {
+    RequestLoadLoc = 2,
+    ResponseLoadLoc = 3
+}
+export type Localizations = {
+    errorOutputExceedsLinkToOpenFormatString: string;
+};

@@ -1,12 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import type * as nbformat from '@jupyterlab/nbformat';
 import { inject, injectable, named } from 'inversify';
 import { DebugConfiguration, Disposable, NotebookDocument } from 'vscode';
 import { IPythonApiProvider } from '../../platform/api/types';
-import { traceInfo, traceInfoIfCI, traceWarning } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { IPlatformService } from '../../platform/common/platform/types';
 import { IConfigurationService } from '../../platform/common/types';
 import { DataScience } from '../../platform/common/utils/localize';
@@ -20,6 +19,8 @@ import { IFileGeneratedCodes } from '../editor-integration/types';
 import { IJupyterDebugService } from '../../notebooks/debugger/debuggingTypes';
 import { executeSilently } from '../../kernels/helpers';
 import { buildSourceMap } from './helper';
+import { trimQuotes } from '../../platform/common/helpers';
+import { noop } from '../../platform/common/utils/misc';
 
 /**
  * Public API to begin debugging in the interactive window
@@ -75,7 +76,7 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
         const notebook = kernel.notebook;
         const config = this.configs.get(notebook);
         if (config) {
-            traceInfo('stop debugging');
+            logger.info('stop debugging');
 
             // Tell our debug service to shutdown if possible
             this.debuggingActive = false;
@@ -92,7 +93,7 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
     public async updateSourceMaps(hashes: IFileGeneratedCodes[]): Promise<void> {
         // Make sure that we have an active debugging session at this point
         if (this.debugService.activeDebugSession && this.debuggingActive) {
-            traceInfoIfCI(`Sending debug request for source map`);
+            logger.ci(`Sending debug request for source map`);
             await Promise.all(
                 hashes.map(async (fileHash) => {
                     if (this.debuggingActive) {
@@ -107,25 +108,25 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
     }
 
     public enable(kernel: IKernel) {
-        if (!kernel.session) {
+        if (!kernel.session?.kernel) {
             return;
         }
-        executeSilently(kernel.session, this.tracingEnableCode, {
+        executeSilently(kernel.session.kernel, this.tracingEnableCode, {
             traceErrors: true,
             traceErrorsMessage: 'Execute_request failure enabling tracing code for IW',
             telemetryName: Telemetry.InteractiveWindowDebugSetupCodeFailure
-        }).ignoreErrors();
+        }).catch(noop);
     }
 
     public disable(kernel: IKernel) {
-        if (!kernel.session) {
+        if (!kernel.session?.kernel) {
             return;
         }
-        executeSilently(kernel.session, this.tracingDisableCode, {
+        executeSilently(kernel.session.kernel, this.tracingDisableCode, {
             traceErrors: true,
             traceErrorsMessage: 'Execute_request failure disabling tracing code for IW',
             telemetryName: Telemetry.InteractiveWindowDebugSetupCodeFailure
-        }).ignoreErrors();
+        }).catch(noop);
     }
 
     private async startDebugSession(
@@ -133,14 +134,14 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
         kernel: IKernel,
         extraConfig: Partial<DebugConfiguration>
     ) {
-        traceInfo('start debugging');
-        if (!kernel.session) {
+        logger.info('start debugging');
+        if (!kernel.session?.kernel) {
             return;
         }
         // Try to connect to this notebook
         const config = await this.connect(kernel, extraConfig);
         if (config) {
-            traceInfo('connected to notebook during debugging');
+            logger.info('connected to notebook during debugging');
 
             this.debuggingActive = await startCommand(config);
 
@@ -150,15 +151,15 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
                 this.debugService.removeBreakpoints([]);
 
                 // Wait for attach before we turn on tracing and allow the code to run, if the IDE is already attached this is just a no-op
-                const importResults = await executeSilently(kernel.session, this.waitForDebugClientCode, {
+                const importResults = await executeSilently(kernel.session.kernel, this.waitForDebugClientCode, {
                     traceErrors: true,
                     traceErrorsMessage: 'Execute_request failure starting debug session for IW',
                     telemetryName: Telemetry.InteractiveWindowDebugSetupCodeFailure
                 });
                 if (importResults.some((item) => item.output_type === 'error')) {
-                    traceWarning(`${this.debuggerPackage} not found in path.`);
+                    logger.warn(`${this.debuggerPackage} not found in path.`);
                 } else {
-                    traceInfo(`import startup: ${getPlainTextOrStreamOutput(importResults)}`);
+                    logger.info(`import startup: ${getPlainTextOrStreamOutput(importResults)}`);
                 }
 
                 // After attach initially disable debugging
@@ -181,7 +182,7 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
                 ...extraConfig
             };
         }
-        traceInfo('enable debugger attach');
+        logger.info('enable debugger attach');
 
         // Append any specific debugger paths that we have
         await this.appendDebuggerPaths(kernel);
@@ -264,10 +265,10 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
         const debuggerPathList = await this.calculateDebuggerPathList(kernel);
 
         if (debuggerPathList && debuggerPathList.length > 0) {
-            const result = kernel.session
+            const result = kernel.session?.kernel
                 ? await executeSilently(
-                      kernel.session,
-                      `import sys\r\nsys.path.extend([${debuggerPathList}])\r\nsys.path`,
+                      kernel.session.kernel,
+                      `import sys as _VSCODE_sys\r\n_VSCODE_sys.path.extend([${debuggerPathList}])\r\n_VSCODE_sys.path\r\ndel _VSCODE_sys`,
                       {
                           traceErrors: true,
                           traceErrorsMessage: 'Execute_request failure appending debugger paths for IW',
@@ -275,13 +276,13 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
                       }
                   )
                 : [];
-            traceInfo(`Appending paths: ${getPlainTextOrStreamOutput(result)}`);
+            logger.info(`Appending paths: ${getPlainTextOrStreamOutput(result)}`);
         }
     }
 
     private async connectToLocal(kernel: IKernel): Promise<{ port: number; host: string }> {
-        const outputs = kernel.session
-            ? await executeSilently(kernel.session, this.enableDebuggerCode, {
+        const outputs = kernel.session?.kernel
+            ? await executeSilently(kernel.session.kernel, this.enableDebuggerCode, {
                   traceErrors: true,
                   traceErrorsMessage: 'Execute_request failure enabling debugging for IW',
                   telemetryName: Telemetry.InteractiveWindowDebugSetupCodeFailure
@@ -290,19 +291,23 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
 
         // Pull our connection info out from the cells returned by enable_attach
         if (outputs.length > 0) {
-            let enableAttachString = getPlainTextOrStreamOutput(outputs);
-            if (enableAttachString) {
-                enableAttachString = enableAttachString.trimQuotes();
+            // Debugger can log warning messages, we need to exclude those.
+            // Simplest is to test each output.
+            for (const output of outputs) {
+                let enableAttachString = getPlainTextOrStreamOutput([output]);
+                if (enableAttachString) {
+                    enableAttachString = trimQuotes(enableAttachString);
 
-                // Important: This regex matches the format of the string returned from enable_attach. When
-                // doing enable_attach remotely, make sure to print out a string in the format ('host', port)
-                const debugInfoRegEx = /\('(.*?)', ([0-9]*)\)/;
-                const debugInfoMatch = debugInfoRegEx.exec(enableAttachString);
-                if (debugInfoMatch) {
-                    return {
-                        port: parseInt(debugInfoMatch[2], 10),
-                        host: debugInfoMatch[1]
-                    };
+                    // Important: This regex matches the format of the string returned from enable_attach. When
+                    // doing enable_attach remotely, make sure to print out a string in the format ('host', port)
+                    const debugInfoRegEx = /\('(.*?)', ([0-9]*)\)/;
+                    const debugInfoMatch = debugInfoRegEx.exec(enableAttachString);
+                    if (debugInfoMatch) {
+                        return {
+                            port: parseInt(debugInfoMatch[2], 10),
+                            host: debugInfoMatch[1]
+                        };
+                    }
                 }
             }
         }
@@ -316,7 +321,7 @@ export class InteractiveWindowDebugger implements IInteractiveWindowDebugger {
             );
         }
         throw new JupyterDebuggerNotInstalledError(
-            DataScience.jupyterDebuggerOutputParseError().format(this.debuggerPackage),
+            DataScience.jupyterDebuggerOutputParseError(this.debuggerPackage),
             undefined,
             kernel.kernelConnectionMetadata
         );

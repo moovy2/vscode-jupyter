@@ -3,8 +3,7 @@
 
 import { inject, injectable, named } from 'inversify';
 import { Memento } from 'vscode';
-import { IApplicationShell } from '../../../../platform/common/application/types';
-import { GLOBAL_MEMENTO, IConfigurationService, IHttpClient, IMemento } from '../../../../platform/common/types';
+import { GLOBAL_MEMENTO, IConfigurationService, IMemento } from '../../../../platform/common/types';
 import { IKernel } from '../../../../kernels/types';
 import { CDNWidgetScriptSourceProvider } from './cdnWidgetScriptSourceProvider';
 import { RemoteWidgetScriptSourceProvider } from './remoteWidgetScriptSourceProvider';
@@ -22,19 +21,16 @@ import {
 export class ScriptSourceProviderFactory implements IWidgetScriptSourceProviderFactory {
     constructor(
         @inject(IConfigurationService) private readonly configurationSettings: IConfigurationService,
-        @inject(IApplicationShell) private readonly appShell: IApplicationShell,
         @inject(IMemento) @named(GLOBAL_MEMENTO) private readonly globalMemento: Memento,
         @inject(IIPyWidgetScriptManagerFactory)
         private readonly widgetScriptManagerFactory: IIPyWidgetScriptManagerFactory
     ) {}
 
-    public getProviders(kernel: IKernel, _uriConverter: ILocalResourceUriConverter, httpClient: IHttpClient) {
+    public getProviders(kernel: IKernel, _uriConverter: ILocalResourceUriConverter) {
         const scriptProviders: IWidgetScriptSourceProvider[] = [];
 
         // Give preference to CDN.
-        scriptProviders.push(
-            new CDNWidgetScriptSourceProvider(this.appShell, this.globalMemento, this.configurationSettings, httpClient)
-        );
+        scriptProviders.push(new CDNWidgetScriptSourceProvider(this.globalMemento, this.configurationSettings));
 
         // Only remote is supported at the moment
         switch (kernel.kernelConnectionMetadata.kind) {

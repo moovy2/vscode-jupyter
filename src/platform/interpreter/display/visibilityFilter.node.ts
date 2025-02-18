@@ -2,30 +2,29 @@
 // Licensed under the MIT License.
 
 import { inject, injectable } from 'inversify';
-import { Event, EventEmitter } from 'vscode';
-import { IExtensionSingleActivationService } from '../../activation/types';
+import { Event, EventEmitter, window } from 'vscode';
+import { IExtensionSyncActivationService } from '../../activation/types';
 import { IInterpreterStatusbarVisibilityFilter, IPythonApiProvider, IPythonExtensionChecker } from '../../api/types';
-import { IVSCodeNotebook } from '../../common/application/types';
 import { IDisposableRegistry } from '../../common/types';
 import { isJupyterNotebook } from '../../common/utils';
+import { noop } from '../../common/utils/misc';
 
 /**
  * Singleton that listens to active editor changes in order to hide/show the python interpreter
  */
 @injectable()
 export class InterpreterStatusBarVisibility
-    implements IInterpreterStatusbarVisibilityFilter, IExtensionSingleActivationService
+    implements IInterpreterStatusbarVisibilityFilter, IExtensionSyncActivationService
 {
     private _changed = new EventEmitter<void>();
     private _registered = false;
 
     constructor(
-        @inject(IVSCodeNotebook) private readonly vscNotebook: IVSCodeNotebook,
         @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry,
         @inject(IPythonExtensionChecker) private extensionChecker: IPythonExtensionChecker,
         @inject(IPythonApiProvider) private pythonApi: IPythonApiProvider
     ) {
-        vscNotebook.onDidChangeActiveNotebookEditor(
+        window.onDidChangeActiveNotebookEditor(
             () => {
                 this._changed.fire();
             },
@@ -33,7 +32,7 @@ export class InterpreterStatusBarVisibility
             disposables
         );
     }
-    public async activate(): Promise<void> {
+    public activate() {
         // Tell the python extension about our filter
         if (this.extensionChecker.isPythonExtensionActive) {
             this.registerStatusFilter();
@@ -45,10 +44,7 @@ export class InterpreterStatusBarVisibility
         return this._changed.event;
     }
     public get hidden() {
-        return this.vscNotebook.activeNotebookEditor &&
-            isJupyterNotebook(this.vscNotebook.activeNotebookEditor.notebook)
-            ? true
-            : false;
+        return window.activeNotebookEditor && isJupyterNotebook(window.activeNotebookEditor.notebook) ? true : false;
     }
     private registerStatusFilter() {
         if (this._registered) {
@@ -65,6 +61,6 @@ export class InterpreterStatusBarVisibility
                     this._changed.fire();
                 }
             })
-            .ignoreErrors();
+            .catch(noop);
     }
 }

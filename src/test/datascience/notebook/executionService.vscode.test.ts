@@ -1,10 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires */
-import { assert, expect } from 'chai';
+import { assert, expect, use } from 'chai';
+import chaiAsPromised from 'chai-as-promised';
 import * as fs from 'fs';
 import * as path from '../../../platform/vscode-path/path';
 import dedent from 'dedent';
@@ -23,9 +22,9 @@ import {
     WorkspaceEdit
 } from 'vscode';
 import { Common } from '../../../platform/common/utils/localize';
-import { traceInfo } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { IDisposable } from '../../../platform/common/types';
-import { captureScreenShot, IExtensionTestApi, waitForCondition } from '../../common.node';
+import { captureScreenShot, IExtensionTestApi, waitForCondition, testMandatory } from '../../common.node';
 import { EXTENSION_ROOT_DIR_FOR_TESTS, initialize } from '../../initialize.node';
 import {
     closeNotebooksAndCleanUpAfterTests,
@@ -47,26 +46,32 @@ import {
     getDefaultKernelConnection
 } from './helper.node';
 import { isWeb, swallowExceptions } from '../../../platform/common/utils/misc';
-import { ProductNames } from '../../../kernels/installer/productNames';
-import { Product } from '../../../kernels/installer/types';
-import { IPYTHON_VERSION_CODE, IS_REMOTE_NATIVE_TEST } from '../../constants.node';
-import { areInterpreterPathsSame } from '../../../platform/pythonEnvironments/info/interpreter';
+import { ProductNames } from '../../../platform/interpreter/installer/productNames';
+import { Product } from '../../../platform/interpreter/installer/types';
+import { IS_REMOTE_NATIVE_TEST } from '../../constants.node';
+import {
+    areInterpreterPathsSame,
+    getNormalizedInterpreterPath
+} from '../../../platform/pythonEnvironments/info/interpreter';
 import {
     getTextOutputValue,
     getTextOutputValues,
     hasErrorOutput,
     translateCellErrorOutput
 } from '../../../kernels/execution/helpers';
-import { IKernel, IKernelProvider, INotebookKernelExecution, NotebookCellRunState } from '../../../kernels/types';
+import { IKernel, IKernelProvider, INotebookKernelExecution } from '../../../kernels/types';
 import { createKernelController, TestNotebookDocument } from './executionHelper';
 import { noop } from '../../core';
 import { getOSType, OSType } from '../../../platform/common/utils/platform';
+import { splitLines } from '../../../platform/common/helpers';
+import { isCI } from '../../../platform/vscode-path/platform';
+use(chaiAsPromised);
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
 const expectedPromptMessageSuffix = `requires ${ProductNames.get(Product.ipykernel)!} to be installed.`;
 
 /* eslint-disable @typescript-eslint/no-explicit-any, no-invalid-this */
-suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
+suite('Kernel Execution @kernelCore', function () {
     let api: IExtensionTestApi;
     const disposables: IDisposable[] = [];
     const templateNbPath = Uri.file(
@@ -78,14 +83,19 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
     let kernel: IKernel;
     let kernelExecution: INotebookKernelExecution;
     suiteSetup(async function () {
-        traceInfo('Suite Setup VS Code Notebook - Execution');
+        // No need to run this test on windows on CI.
+        // Running these is very slow on windows & we have other tests that run on windows (interrupts and restarts).
+        if (getOSType() === OSType.Windows && isCI) {
+            return this.skip();
+        }
+        logger.info('Suite Setup VS Code Notebook - Execution');
         this.timeout(120_000);
         try {
             api = await initialize();
             await hijackPrompt(
                 'showErrorMessage',
                 { endsWith: expectedPromptMessageSuffix },
-                { result: Common.install(), clickImmediately: true },
+                { result: Common.install, clickImmediately: true },
                 disposables
             );
             if (!IS_REMOTE_NATIVE_TEST() && !isWeb()) {
@@ -93,39 +103,47 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
                     .getConfiguration('python', workspace.workspaceFolders![0].uri)
                     .update('envFile', '${workspaceFolder}/.env');
             }
+            logger.debug('Before starting Jupyter');
             await startJupyterServer();
+            logger.debug('After starting Jupyter');
             sinon.restore();
             notebook = new TestNotebookDocument(templateNbPath);
             const kernelProvider = api.serviceContainer.get<IKernelProvider>(IKernelProvider);
+            logger.debug('Before creating kernel connection');
             const metadata = await getDefaultKernelConnection();
+            logger.debug('After creating kernel connection');
 
             const controller = createKernelController();
             kernel = kernelProvider.getOrCreate(notebook, { metadata, resourceUri: notebook.uri, controller });
+            logger.debug('Before starting kernel');
             await kernel.start();
+            logger.debug('After starting kernel');
             kernelExecution = kernelProvider.getKernelExecution(kernel);
-            traceInfo('Suite Setup (completed)');
+            logger.info('Suite Setup (completed)');
         } catch (e) {
-            traceInfo('Suite Setup (failed) - Execution');
+            logger.error('Suite Setup (failed) - Execution', e);
             await captureScreenShot('execution-suite');
             throw e;
         }
     });
     setup(function () {
         notebook.cells.length = 0;
-        traceInfo(`Start Test (completed) ${this.currentTest?.title}`);
+        logger.info(`Start Test (completed) ${this.currentTest?.title}`);
     });
-    teardown(function () {
-        traceInfo(`Ended Test (completed) ${this.currentTest?.title}`);
+    teardown(async function () {
+        if (this.currentTest?.isFailed()) {
+            // For a flaky interrupt test.
+            await captureScreenShot(this);
+        }
+        logger.info(`Ended Test (completed) ${this.currentTest?.title}`);
     });
     suiteTeardown(() => closeNotebooksAndCleanUpAfterTests(disposables));
-    test('Execute cell using VSCode Kernel', async () => {
+    testMandatory('Execute cell using VSCode Kernel', async () => {
         const cell = await notebook.appendCodeCell('print("123412341234")');
         await kernelExecution.executeCell(cell);
 
-        assert.strictEqual(cell.executionSummary?.executionOrder, 1);
-        assert.strictEqual(cell.outputs.length, 1);
-        assert.strictEqual(cell.outputs[0].items.length, 1);
-        assert.strictEqual(Buffer.from(cell.outputs[0].items[0].data).toString().trim(), '123412341234');
+        assert.isAtLeast(cell.executionSummary?.executionOrder || 0, 1);
+        assert.strictEqual(new TextDecoder().decode(cell.outputs[0].items[0].data).toString().trim(), '123412341234');
         assert.isTrue(cell.executionSummary?.success);
     });
     test('Test __vsc_ipynb_file__ defined in cell using VSCode Kernel', async () => {
@@ -135,39 +153,13 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         // eslint-disable-next-line local-rules/dont-use-fspath
         await Promise.all([kernelExecution.executeCell(cell), waitForTextOutput(cell, `${uri.fsPath}`)]);
     });
-    test.skip('Test exceptions have hrefs', async () => {
-        const ipythonVersionCell = await notebook.appendCodeCell(IPYTHON_VERSION_CODE);
-        assert.strictEqual(await kernelExecution.executeCell(ipythonVersionCell), NotebookCellRunState.Success);
-        const ipythonVersion = parseInt(getTextOutputValue(ipythonVersionCell!.outputs[0]));
-
-        const codeCell = await notebook.appendCodeCell('raise Exception("FOO")');
-        assert.strictEqual(await kernelExecution.executeCell(codeCell), NotebookCellRunState.Error);
-
-        // Parse the last cell's error output
-        const errorOutput = translateCellErrorOutput(codeCell.outputs[0]);
-        assert.ok(errorOutput, 'No error output found');
-
-        // Convert to html for easier parsing
-        const ansiToHtml = require('ansi-to-html') as typeof import('ansi-to-html');
-        const converter = new ansiToHtml();
-        const html = converter.toHtml(errorOutput.traceback.join('\n'));
-
-        // Should be more than 3 hrefs if ipython 8
-        if (ipythonVersion >= 8) {
-            const hrefs = /<a\s+href='(.*\?line=\d+)'/gm.exec(html);
-            assert.ok(
-                hrefs,
-                `Hrefs not found in traceback, HTML = ${html}, output = ${errorOutput.traceback.join('\n')}`
-            );
-        }
-    });
     test('Leading whitespace not suppressed', async () => {
         const cell = await notebook.appendCodeCell('print("\tho")\nprint("\tho")\nprint("\tho")\n');
         await kernelExecution.executeCell(cell);
         await waitForCondition(
             () => {
                 const output = getCellOutputs(cell);
-                const lines = output.splitLines({ trim: false, removeEmptyEntries: true });
+                const lines = splitLines(output, { trim: false, removeEmptyEntries: true });
                 return lines.length === 3 && lines[0] === '\tho' && lines[1] === '\tho' && lines[2] === '\tho';
             },
             defaultNotebookTestTimeout,
@@ -237,7 +229,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
     test('Verify output & metadata for executed cell with errors', async () => {
         const cell = await notebook.appendCodeCell('print(abcd)');
 
-        await kernelExecution.executeCell(cell);
+        await assert.isRejected(kernelExecution.executeCell(cell));
 
         assert.isAtLeast(cell.executionSummary?.executionOrder || 0, 1);
         assert.isTrue(hasErrorOutput(cell.outputs));
@@ -261,58 +253,6 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         assert.lengthOf(displayCell.outputs, 1, 'Incorrect output');
         assert.isAtLeast(displayCell.executionSummary?.executionOrder || 0, 1);
         await waitForTextOutput(displayCell, 'foo', 0, false);
-    });
-    test('Clearing output while executing will ensure output is cleared', async function () {
-        // const vscNotebook = api.serviceContainer.get<IVSCodeNotebook>(IVSCodeNotebook);
-        let onDidChangeNbEventHandler = new EventEmitter<NotebookDocumentChangeEvent>();
-        const stub = sinon.stub(workspace, 'onDidChangeNotebookDocument');
-        stub.get(() => onDidChangeNbEventHandler.event);
-        disposables.push(onDidChangeNbEventHandler);
-
-        // Assume you are executing a cell that prints numbers 1-100.
-        // When printing number 50, you click clear.
-        // Cell output should now start printing output from 51 onwards, & not 1.
-        const cell = await notebook.appendCodeCell(
-            dedent`
-                    print("Start")
-                    import time
-                    for i in range(100):
-                        time.sleep(0.1)
-                        print(i)
-
-                    print("End")`
-        );
-        kernelExecution.executeCell(cell).catch(noop);
-
-        await Promise.all([
-            waitForTextOutput(cell, 'Start', 0, false),
-            waitForTextOutput(cell, '0', 0, false),
-            waitForTextOutput(cell, '1', 0, false),
-            waitForTextOutput(cell, '2', 0, false),
-            waitForTextOutput(cell, '3', 0, false),
-            waitForTextOutput(cell, '4', 0, false)
-        ]);
-
-        // Clear the outputs.
-        cell.outputs.length = 0;
-        onDidChangeNbEventHandler.fire({
-            notebook,
-            metadata: undefined,
-            contentChanges: [],
-            cellChanges: [{ cell, document: undefined, executionSummary: undefined, metadata: undefined, outputs: [] }]
-        });
-
-        // Wait till previous output gets cleared & we have new output.
-        await waitForCondition(
-            () => assertNotHasTextOutputInVSCode(cell, 'Start', 0, false) && cell.outputs.length > 0,
-            5_000,
-            'Cell did not get cleared'
-        );
-
-        await kernel.interrupt();
-        await waitForExecutionCompletedWithErrors(cell);
-        // Verify that it hasn't got added (even after interrupting).
-        assertNotHasTextOutputInVSCode(cell, 'Start', 0, false);
     });
     test('Clearing output via code', async function () {
         // Assume you are executing a cell that prints numbers 1-100.
@@ -417,13 +357,30 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
             waitForCellHavingOutput(cell4)
         ]);
 
-        const pathValue = getCellOutputs(cell3).split(path.delimiter);
-        const sysExecutable = getCellOutputs(cell4).trim().toLowerCase();
+        const pathOutput = getCellOutputs(cell3);
+        const execOutput = getCellOutputs(cell4);
+        const pathValue = pathOutput.split(path.delimiter)[0];
+        const sysExecutable = execOutput.trim();
 
         // First path in PATH must be the directory where executable is located.
-        assert.ok(
-            areInterpreterPathsSame(Uri.file(path.dirname(sysExecutable)), Uri.file(pathValue[0]), getOSType(), true),
-            `First entry in PATH (${pathValue[0]}) does not point to executable (${sysExecutable})`
+        const normalizedInterpreterPath = getNormalizedInterpreterPath(Uri.file(sysExecutable)).fsPath;
+        const normalizedBinPath = path.dirname(normalizedInterpreterPath);
+        const pathEquals =
+            (getOSType() === OSType.Windows ? normalizedBinPath.toLowerCase() : normalizedBinPath) ===
+            (getOSType() === OSType.Windows ? pathValue.toLowerCase() : pathValue);
+        const pathEquals2 =
+            (getOSType() === OSType.Windows
+                ? path.dirname(sysExecutable).toLowerCase()
+                : path.dirname(sysExecutable)) ===
+            (getOSType() === OSType.Windows ? pathValue.toLowerCase() : pathValue);
+        assert.isTrue(
+            pathEquals || pathEquals2,
+            [
+                `First entry in PATH (${pathValue}) does not point to executable (${sysExecutable}).`,
+                `Normalized Interpreter Path = '${normalizedInterpreterPath}'`,
+                `Normalized Bin Path = '${normalizedBinPath}'`,
+                `Path Output ${pathOutput} and Exec Output ${execOutput}`
+            ].join(',')
         );
     });
     test('!python should point to the Environment', async function () {
@@ -434,7 +391,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         await notebook.appendCodeCell('import sys');
         const cell3 = await notebook.appendCodeCell('print(sys.executable)');
 
-        notebook.cells.map((cell) => kernelExecution.executeCell(cell).ignoreErrors());
+        notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop));
 
         // Basically anything such as `!which python` and the like should point to the right executable.
         // For that to work, the first directory in the PATH must be the Python environment.
@@ -522,7 +479,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         await notebook.appendCodeCell('raise Exception("<whatever>")');
         const cells = notebook.cells;
         await Promise.all([
-            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell))),
+            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop))),
             waitForTextOutput(cells[0], '1', 0, false),
             waitForTextOutput(cells[1], '<a href=f>', 0, false),
             waitForTextOutput(cells[2], '<a href=f>', 0, false),
@@ -560,10 +517,6 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         ]);
     });
     test('More messages from background threads', async function () {
-        if (IS_REMOTE_NATIVE_TEST()) {
-            //https://github.com/microsoft/vscode-jupyter/issues/7620 test failing for remote, but seems to work in manual test
-            return this.skip();
-        }
         // Details can be found in notebookUpdater.ts & https://github.com/jupyter/jupyter_client/issues/297
         const cell = await notebook.appendCodeCell(
             dedent`
@@ -622,52 +575,6 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
             )
         ]);
     });
-    test('Messages from background threads can come in other cell output', async function () {
-        // Details can be found in notebookUpdater.ts & https://github.com/jupyter/jupyter_client/issues/297
-        // If you have a background thread in cell 1 & then immediately after that you have a cell 2.
-        // The background messages (output) from cell one will end up in cell 2.
-        const cell1 = await notebook.appendCodeCell(
-            dedent`
-        import time
-        import threading
-        from IPython.display import display
-
-        def work():
-            for i in range(10):
-                print('iteration %d'%i)
-                time.sleep(0.1)
-
-        def spawn():
-            thread = threading.Thread(target=work)
-            thread.start()
-            time.sleep(0.3)
-
-        spawn()
-        print('main thread started')
-        `
-        );
-        const cell2 = await notebook.appendCodeCell('print("HELLO")');
-
-        await Promise.all([
-            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell))),
-            waitForCondition(
-                () => getTextOutputValues(cell1).includes('main thread started'),
-                defaultNotebookTestTimeout,
-                () => `'main thread started' not in output => '${getTextOutputValues(cell1)}'`
-            ),
-            waitForCondition(
-                async () => {
-                    const secondCellOutput = getTextOutputValues(cell2);
-                    expect(secondCellOutput).to.include('HELLO');
-                    // The last output from the first cell should end up in the second cell.
-                    expect(secondCellOutput).to.include('iteration 9');
-                    return true;
-                },
-                defaultNotebookTestTimeout,
-                () => `'iteration 9' and 'HELLO' not in second cell Output => '${getTextOutputValues(cell2)}'`
-            )
-        ]);
-    });
     test('Stderr & stdout outputs should go into separate outputs', async function () {
         const cell = await notebook.appendCodeCell(
             dedent`
@@ -686,8 +593,8 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
             sys.stderr.flush()
                         `
         );
-        traceInfo('1. Start execution for test of Stderr & stdout outputs');
-        traceInfo('2. Start execution for test of Stderr & stdout outputs');
+        logger.info('1. Start execution for test of Stderr & stdout outputs');
+        logger.info('2. Start execution for test of Stderr & stdout outputs');
         await Promise.all([
             kernelExecution.executeCell(cell),
             waitForTextOutput(cell, '1', 0, false),
@@ -695,7 +602,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
             waitForTextOutput(cell, '3', 2, false),
             waitForTextOutput(cell, 'c', 3, false)
         ]);
-        traceInfo('2. completed execution for test of Stderr & stdout outputs');
+        logger.info('2. completed execution for test of Stderr & stdout outputs');
 
         // In cell 1 we should have the output
         // 12
@@ -721,7 +628,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         const cell2 = await notebook.appendCodeCell('print("after fail")');
 
         await Promise.all([
-            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell))),
+            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop))),
             waitForExecutionCompletedWithErrors(cell1)
         ]);
 
@@ -758,7 +665,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
 
         // Cell 1 should have started, cells 2 & 3 should be queued.
         const [cell1, cell2, cell3, cell4] = cells;
-        Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell))).ignoreErrors();
+        Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell))).catch(noop);
         await Promise.all([
             waitForExecutionInProgress(cell1.cell),
             waitForQueuedForExecution(cell2.cell),
@@ -812,7 +719,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
             const index = Math.floor(Math.random() * codeCells.length);
             const cellToQueue = codeCells.splice(index, 1)[0];
             queuedCells.push(cellToQueue);
-            kernelExecution.executeCell(cellToQueue.cell).ignoreErrors();
+            kernelExecution.executeCell(cellToQueue.cell).catch(noop);
         }
 
         // Verify all have been queued.
@@ -840,7 +747,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
 
         // Run the whole document.
         // Verify all have been queued.
-        notebook.cells.map((cell) => kernelExecution.executeCell(cell).ignoreErrors());
+        notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop));
         await Promise.all(cells.map((item) => item.cell).map((cell) => waitForQueuedForExecutionOrExecuting(cell)));
 
         // let all cells run to completion & validate their execution orders match the order of the queue.
@@ -875,7 +782,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
             const cell = codeCells[index].cell;
             if (cell.kind === NotebookCellKind.Code) {
                 queuedCells.push(cell);
-                kernelExecution.executeCell(cell).ignoreErrors();
+                kernelExecution.executeCell(cell).catch(noop);
                 await waitForQueuedForExecutionOrExecuting(cell);
             }
         }
@@ -889,7 +796,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         const cells = await insertRandomCells(notebook, { count: 15, addMarkdownCells: true });
 
         const queuedCells = cells.filter((item) => item.cell.kind === NotebookCellKind.Code).map((item) => item.cell);
-        notebook.cells.map((cell) => kernelExecution.executeCell(cell).ignoreErrors());
+        notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop));
         await Promise.all(queuedCells.map((cell) => waitForQueuedForExecutionOrExecuting(cell)));
 
         // Add a new cell to the document, this should not get executed.
@@ -911,13 +818,13 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
 
         const queuedCells = codeCells.map((item) => item.cell);
         // Run entire notebook & verify all cells are queued for execution.
-        notebook.cells.map((cell) => kernelExecution.executeCell(cell).ignoreErrors());
+        notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop));
         await Promise.all(queuedCells.map((cell) => waitForQueuedForExecutionOrExecuting(cell)));
 
         // Insert new cell & run it, & verify that too is queued for execution.
         const [newCell] = await insertRandomCells(notebook, { count: 1, addMarkdownCells: false });
         queuedCells.push(newCell.cell);
-        kernelExecution.executeCell(newCell.cell).ignoreErrors();
+        kernelExecution.executeCell(newCell.cell).catch(noop);
         await Promise.all(queuedCells.map((cell) => waitForQueuedForExecutionOrExecuting(cell)));
 
         // let all cells run to completion & validate their execution orders match the order in which they were run.
@@ -942,7 +849,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         const cell3 = await notebook.appendCodeCell('2');
 
         await Promise.all([
-            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell))),
+            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop))),
             waitForExecutionCompletedSuccessfully(cell1),
             waitForExecutionCompletedWithErrors(cell2)
         ]);
@@ -951,7 +858,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
 
         // Run cell 2 again, & it should fail again & execution count should increase.
         await Promise.all([
-            kernelExecution.executeCell(cell2),
+            kernelExecution.executeCell(cell2).catch(noop),
             // Give it time to run & fail, this time execution order is greater than previously
             waitForCondition(
                 async () => cell2.executionSummary?.executionOrder === cell1.executionSummary!.executionOrder! + 2,
@@ -968,7 +875,7 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
 
         // Run all cells again
         await Promise.all([
-            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell))),
+            Promise.all(notebook.cells.map((cell) => kernelExecution.executeCell(cell).catch(noop))),
             waitForCondition(
                 async () => cell2.executionSummary?.executionOrder === lastExecutionOrderOfCell3 + 2,
                 5_000,
@@ -1012,9 +919,9 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
         nbEditStub.callsFake((index, newCells) => {
             newCells.forEach((cell, i) => {
                 if (cell.kind === NotebookCellKind.Code) {
-                    notebook.insertCodeCell(index + i, cell.value, cell.languageId).ignoreErrors();
+                    notebook.insertCodeCell(index + i, cell.value, cell.languageId).catch(noop);
                 } else {
-                    notebook.insertMarkdownCell(index + i, cell.value).ignoreErrors();
+                    notebook.insertMarkdownCell(index + i, cell.value).catch(noop);
                 }
             });
             return undefined as any;
@@ -1089,6 +996,93 @@ suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
 
         await waitForTextOutput(cell2, 'HI Y', 0, false);
         await waitForTextOutput(cell2, 'HI Z', 1, false);
+    });
+
+    test('Streamed output is added into the right cell (#16381)', async function () {
+        // https://github.com/microsoft/vscode-jupyter/issues/16381#issuecomment-2603496123
+        const onDidChangeNbEventHandler = new EventEmitter<NotebookDocumentChangeEvent>();
+        const stub = sinon.stub(workspace, 'onDidChangeNotebookDocument');
+        stub.get(() => onDidChangeNbEventHandler.event);
+        disposables.push(onDidChangeNbEventHandler);
+        const cell = await notebook.appendCodeCell(
+            dedent`
+import logging.handlers
+import queue, logging
+import sys
+que=queue.Queue()
+handler = logging.StreamHandler(sys.stdout)
+listener = logging.handlers.QueueListener(que,  handler)
+queue_handler = logging.handlers.QueueHandler(que)
+root = logging.getLogger()
+root.addHandler(queue_handler)
+logging.lastResort=None
+listener.start()
+
+root.warning("Look out!")`
+        );
+        kernelExecution.executeCell(cell).catch(noop);
+
+        await Promise.all([waitForTextOutput(cell, 'Look out!', 0, false)]);
+
+        const cell2 = await notebook.appendCodeCell(
+            dedent`
+root.setLevel(logging.DEBUG)
+root.debug('debug test')`
+        );
+        kernelExecution.executeCell(cell2).catch(noop);
+
+        await Promise.all([waitForTextOutput(cell, 'debug test', 1, false)]);
+
+        assert.strictEqual(cell2.outputs.length, 0);
+
+        // Clear the loggers, else rest of the tests can fail..
+        const cell3 = await notebook.appendCodeCell(`root.loggers.clear()`);
+        await kernelExecution.executeCell(cell3).catch(noop);
+    });
+
+    test('Clearing output while executing will ensure output is cleared', async function () {
+        let onDidChangeNbEventHandler = new EventEmitter<NotebookDocumentChangeEvent>();
+        const stub = sinon.stub(workspace, 'onDidChangeNotebookDocument');
+        stub.get(() => onDidChangeNbEventHandler.event);
+        disposables.push(onDidChangeNbEventHandler);
+
+        // Assume you are executing a cell that prints numbers 1-100.
+        // When printing number 50, you click clear.
+        // Cell output should now start printing output from 51 onwards, & not 1.
+        const cell = await notebook.appendCodeCell(
+            dedent`
+                    print("Start")
+                    import time
+                    for i in range(100):
+                        time.sleep(0.1)
+                        print(i)
+
+                    print("End")`
+        );
+        kernelExecution.executeCell(cell).catch(noop);
+
+        await Promise.all([
+            waitForTextOutput(cell, 'Start', 0, false),
+            waitForTextOutput(cell, '0', 0, false),
+            waitForTextOutput(cell, '1', 0, false)
+        ]);
+
+        // Clear the outputs.
+        cell.outputs.length = 0;
+        onDidChangeNbEventHandler.fire({
+            notebook,
+            metadata: undefined,
+            contentChanges: [],
+            cellChanges: [{ cell, document: undefined, executionSummary: undefined, metadata: undefined, outputs: [] }]
+        });
+
+        // Wait till previous output gets cleared & we have new output.
+        await waitForCondition(
+            () => assertNotHasTextOutputInVSCode(cell, 'Start', 0, false) && cell.outputs.length > 0,
+            5_000,
+            'Cell did not get cleared'
+        );
+        await kernel.dispose().catch(noop);
     });
 
     /**

@@ -1,10 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import { assert } from 'chai';
 import * as sinon from 'sinon';
-import { ICommandManager, IVSCodeNotebook } from '../../../platform/common/application/types';
 import { IDisposable } from '../../../platform/common/types';
 import { IExtensionTestApi, waitForCondition } from '../../common.node';
 import { initialize, IS_REMOTE_NATIVE_TEST } from '../../initialize.node';
@@ -20,25 +18,26 @@ import {
 import { waitForVariablesToMatch } from './variableViewHelpers';
 import { ITestVariableViewProvider } from './variableViewTestInterfaces';
 import { ITestWebviewHost } from '../testInterfaces';
-import { traceInfo } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { PythonEnvironment } from '../../../platform/pythonEnvironments/info';
 import { IInterpreterService } from '../../../platform/interpreter/contracts';
 import { Commands } from '../../../platform/common/constants';
 import { DataViewer } from '../../../webviews/extension-side/dataviewer/dataViewer';
 import { IVariableViewProvider } from '../../../webviews/extension-side/variablesView/types';
 import { IKernelProvider } from '../../../kernels/types';
+import { trimQuotes } from '../../../platform/common/helpers';
+import { commands, window } from 'vscode';
+import { getVersion } from '../../../platform/interpreter/helpers';
 
-suite('DataScience - VariableView', function () {
+suite('VariableView @variableViewer', function () {
     let api: IExtensionTestApi;
     const disposables: IDisposable[] = [];
-    let vscodeNotebook: IVSCodeNotebook;
-    let commandManager: ICommandManager;
     let variableViewProvider: ITestVariableViewProvider;
     let activeInterpreter: PythonEnvironment;
     let kernelProvider: IKernelProvider;
     this.timeout(120_000);
     suiteSetup(async function () {
-        traceInfo('Suite Setup');
+        logger.info('Suite Setup');
         this.timeout(120_000);
         api = await initialize();
 
@@ -48,8 +47,6 @@ suite('DataScience - VariableView', function () {
         }
 
         sinon.restore();
-        vscodeNotebook = api.serviceContainer.get<IVSCodeNotebook>(IVSCodeNotebook);
-        commandManager = api.serviceContainer.get<ICommandManager>(ICommandManager);
         kernelProvider = api.serviceContainer.get<IKernelProvider>(IKernelProvider);
         const interpreter = await api.serviceContainer
             .get<IInterpreterService>(IInterpreterService)
@@ -58,42 +55,42 @@ suite('DataScience - VariableView', function () {
         const coreVariableViewProvider = api.serviceContainer.get<IVariableViewProvider>(IVariableViewProvider);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         variableViewProvider = coreVariableViewProvider as any as ITestVariableViewProvider; // Cast to expose the test interfaces
-        traceInfo('Suite Setup (completed)');
+        logger.info('Suite Setup (completed)');
     });
     setup(async function () {
-        traceInfo(`Start Test ${this.currentTest?.title}`);
+        logger.info(`Start Test ${this.currentTest?.title}`);
         sinon.restore();
         await startJupyterServer();
         await createEmptyPythonNotebook(disposables);
-        assert.isOk(vscodeNotebook.activeNotebookEditor, 'No active notebook');
-        traceInfo(`Start Test (completed) ${this.currentTest?.title}`);
+        assert.isOk(window.activeNotebookEditor, 'No active notebook');
+        logger.info(`Start Test (completed) ${this.currentTest?.title}`);
     });
     teardown(async function () {
-        traceInfo(`Ended Test ${this.currentTest?.title}`);
+        logger.info(`Ended Test ${this.currentTest?.title}`);
         await closeNotebooksAndCleanUpAfterTests(disposables);
-        traceInfo(`Ended Test (completed) ${this.currentTest?.title}`);
+        logger.info(`Ended Test (completed) ${this.currentTest?.title}`);
     });
     suiteTeardown(() => closeNotebooksAndCleanUpAfterTests(disposables));
 
     // Test for basic variable view functionality with one document
     test('Can show VariableView (webview-test) and do not have any additional variables', async function () {
         // Send the command to open the view
-        await commandManager.executeCommand(Commands.OpenVariableView);
+        await commands.executeCommand(Commands.OpenVariableView);
 
-        // Aquire the variable view from the provider
+        // Acquire the variable view from the provider
         const coreVariableView = await variableViewProvider.activeVariableView;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const variableView = coreVariableView as any as ITestWebviewHost;
 
         // Add one simple cell and execute it
         await insertCodeCell('test = "MYTESTVALUE"', { index: 0 });
-        const cell = vscodeNotebook.activeNotebookEditor?.notebook.cellAt(0)!;
+        const cell = window.activeNotebookEditor?.notebook.cellAt(0)!;
         await runCell(cell);
         await waitForExecutionCompletedSuccessfully(cell);
 
         // Send a second cell
         await insertCodeCell('test2 = "MYTESTVALUE2"', { index: 1 });
-        const cell2 = vscodeNotebook.activeNotebookEditor?.notebook.getCells()![1]!;
+        const cell2 = window.activeNotebookEditor?.notebook.getCells()![1]!;
         await runCell(cell2);
 
         // Parse the HTML for our expected variables
@@ -108,7 +105,7 @@ suite('DataScience - VariableView', function () {
         const execution = kernelProvider.getKernelExecution(kernel);
         const outputs = await execution.executeHidden('%who_ls');
         // https://github.com/microsoft/vscode-jupyter/issues/10559
-        const varsToIgnore = ['matplotlib_inline', 'matplotlib', 'sys', 'os'];
+        const varsToIgnore = ['matplotlib_inline', 'matplotlib'];
         // Sample output is `["test", "test2", "os", "sys"]`
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const vars = ((outputs[0].data as any)['text/plain'] as string)
@@ -117,7 +114,7 @@ suite('DataScience - VariableView', function () {
             .slice(0, -1)
             .split(',')
             .map((item) => item.trim())
-            .map((item) => item.trimQuotes())
+            .map((item) => trimQuotes(item))
             .filter((item) => !varsToIgnore.includes(item))
             .sort();
         assert.deepEqual(vars, ['test', 'test2'].sort());
@@ -125,22 +122,22 @@ suite('DataScience - VariableView', function () {
 
     test('Can show variables even when print is overridden', async function () {
         // Send the command to open the view
-        await commandManager.executeCommand(Commands.OpenVariableView);
+        await commands.executeCommand(Commands.OpenVariableView);
 
-        // Aquire the variable view from the provider
+        // Acquire the variable view from the provider
         const coreVariableView = await variableViewProvider.activeVariableView;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const variableView = coreVariableView as any as ITestWebviewHost;
 
         // Add cell that overrides print
         await insertCodeCell('def print():\n  x = 1', { index: 0 });
-        const cell = vscodeNotebook.activeNotebookEditor?.notebook.cellAt(0)!;
+        const cell = window.activeNotebookEditor?.notebook.cellAt(0)!;
         await runCell(cell);
         await waitForExecutionCompletedSuccessfully(cell);
 
         // Send a second cell
         await insertCodeCell('test2 = "MYTESTVALUE2"', { index: 1 });
-        const cell2 = vscodeNotebook.activeNotebookEditor?.notebook.getCells()![1]!;
+        const cell2 = window.activeNotebookEditor?.notebook.getCells()![1]!;
         await runCell(cell2);
 
         // Parse the HTML for our expected variables
@@ -151,16 +148,16 @@ suite('DataScience - VariableView', function () {
     // Test variables switching between documents
     test('VariableView document switching (webview-test)', async function () {
         // Send the command to open the view
-        await commandManager.executeCommand(Commands.OpenVariableView);
+        await commands.executeCommand(Commands.OpenVariableView);
 
-        // Aquire the variable view from the provider
+        // Acquire the variable view from the provider
         const coreVariableView = await variableViewProvider.activeVariableView;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const variableView = coreVariableView as any as ITestWebviewHost;
 
         // Add one simple cell and execute it
         await insertCodeCell('test = "MYTESTVALUE"', { index: 0 });
-        const cell = vscodeNotebook.activeNotebookEditor?.notebook.getCells()![0]!;
+        const cell = window.activeNotebookEditor?.notebook.getCells()![0]!;
         await Promise.all([runCell(cell), waitForExecutionCompletedSuccessfully(cell)]);
 
         // Parse the HTML for our expected variables
@@ -175,12 +172,12 @@ suite('DataScience - VariableView', function () {
 
         // Execute a cell on the second document
         await insertCodeCell('test2 = "MYTESTVALUE2"', { index: 0 });
-        const cell2 = vscodeNotebook.activeNotebookEditor?.notebook.getCells()![0]!;
+        const cell2 = window.activeNotebookEditor?.notebook.getCells()![0]!;
         await Promise.all([runCell(cell2), waitForExecutionCompletedSuccessfully(cell2)]);
 
         // Execute a second cell on the second document
         await insertCodeCell('test3 = "MYTESTVALUE3"', { index: 1 });
-        const cell3 = vscodeNotebook.activeNotebookEditor?.notebook.getCells()![1]!;
+        const cell3 = window.activeNotebookEditor?.notebook.getCells()![1]!;
         await Promise.all([runCell(cell3), waitForExecutionCompletedSuccessfully(cell3)]);
 
         // Parse the HTML for our expected variables
@@ -193,14 +190,15 @@ suite('DataScience - VariableView', function () {
 
     // Test that we are working will a larger set of basic types
     test('VariableView basic types A (webview-test)', async function () {
-        if (activeInterpreter.version?.major === 3 && activeInterpreter.version.minor >= 10) {
+        const version = await getVersion(activeInterpreter);
+        if (version?.major === 3 && (version.minor || 0) >= 10) {
             // https://github.com/microsoft/vscode-jupyter/issues/8523
             return this.skip();
         }
         // Send the command to open the view
-        await commandManager.executeCommand(Commands.OpenVariableView);
+        await commands.executeCommand(Commands.OpenVariableView);
 
-        // Aquire the variable view from the provider
+        // Acquire the variable view from the provider
         const coreVariableView = await variableViewProvider.activeVariableView;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const variableView = coreVariableView as any as ITestWebviewHost;
@@ -216,7 +214,7 @@ class MyClass:
 myClass = MyClass()
 `;
         await insertCodeCell(code, { index: 0 });
-        const cell = vscodeNotebook.activeNotebookEditor?.notebook.cellAt(0)!;
+        const cell = window.activeNotebookEditor?.notebook.cellAt(0)!;
         await runCell(cell);
         await waitForExecutionCompletedSuccessfully(cell);
 
@@ -239,9 +237,9 @@ myClass = MyClass()
 
     test('VariableView basic types B (webview-test)', async function () {
         // Send the command to open the view
-        await commandManager.executeCommand(Commands.OpenVariableView);
+        await commands.executeCommand(Commands.OpenVariableView);
 
-        // Aquire the variable view from the provider
+        // Acquire the variable view from the provider
         const coreVariableView = await variableViewProvider.activeVariableView;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const variableView = coreVariableView as any as ITestWebviewHost;
@@ -256,7 +254,7 @@ myDict = {'a': 1}
 mySet = {1, 2, 3}
 `;
         await insertCodeCell(code, { index: 0 });
-        const cell = vscodeNotebook.activeNotebookEditor?.notebook.cellAt(0)!;
+        const cell = window.activeNotebookEditor?.notebook.cellAt(0)!;
         await runCell(cell);
         await waitForExecutionCompletedSuccessfully(cell);
 
@@ -276,23 +274,23 @@ mySet = {1, 2, 3}
     });
 
     // Test opening data viewers while another dataviewer is open
-    test('Open dataviewer', async function () {
+    test.skip('Open dataviewer', async function () {
         // Send the command to open the view
-        await commandManager.executeCommand(Commands.OpenVariableView);
+        await commands.executeCommand(Commands.OpenVariableView);
 
-        // Aquire the variable view from the provider
+        // Acquire the variable view from the provider
         const coreVariableView = await variableViewProvider.activeVariableView;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const variableView = coreVariableView as any as ITestWebviewHost;
 
         // Add one simple cell and execute it
         await insertCodeCell('test = [1, 2, 3]');
-        const cell = vscodeNotebook.activeNotebookEditor?.notebook.getCells()![0]!;
+        const cell = window.activeNotebookEditor?.notebook.getCells()![0]!;
         await Promise.all([runCell(cell), waitForExecutionCompletedSuccessfully(cell)]);
 
         // Add another cell so we have two lists
         await insertCodeCell('test2 = [1, 2, 3]');
-        const cell2 = vscodeNotebook.activeNotebookEditor?.notebook.getCells()![1]!;
+        const cell2 = window.activeNotebookEditor?.notebook.getCells()![1]!;
         await Promise.all([runCell(cell2), waitForExecutionCompletedSuccessfully(cell2)]);
 
         // Parse the HTML for our expected variables

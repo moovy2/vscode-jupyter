@@ -4,12 +4,12 @@
 import { inject, injectable } from 'inversify';
 import { NotebookDocument } from 'vscode';
 import { IKernel, IKernelProvider } from '../kernels/types';
-import { IControllerSelection } from '../notebooks/controllers/types';
+import { IControllerRegistration } from '../notebooks/controllers/types';
 import { IExtensionSyncActivationService } from '../platform/activation/types';
-import { InteractiveWindowView } from '../platform/common/constants';
-import { disposeAllDisposables } from '../platform/common/helpers';
+import { dispose } from '../platform/common/utils/lifecycle';
 import { IDisposable, IDisposableRegistry } from '../platform/common/types';
 import { ICodeGeneratorFactory, IGeneratedCodeStorageFactory } from './editor-integration/types';
+import { IReplNotebookTrackerService } from '../platform/notebooks/replNotebookTrackerService';
 
 /**
  * Responsible for updating the GenerateCodeStorage when kernels reload
@@ -22,12 +22,13 @@ export class GeneratedCodeStorageManager implements IExtensionSyncActivationServ
         @inject(IDisposableRegistry) disposables: IDisposableRegistry,
         @inject(ICodeGeneratorFactory) private readonly codeGeneratorFactory: ICodeGeneratorFactory,
         @inject(IGeneratedCodeStorageFactory) private readonly storageFactory: IGeneratedCodeStorageFactory,
-        @inject(IControllerSelection) private readonly controllers: IControllerSelection
+        @inject(IControllerRegistration) private readonly controllers: IControllerRegistration,
+        @inject(IReplNotebookTrackerService) private readonly replTracker: IReplNotebookTrackerService
     ) {
         disposables.push(this);
     }
     dispose() {
-        disposeAllDisposables(this.disposables);
+        dispose(this.disposables);
     }
     activate(): void {
         this.kernelProvider.onDidCreateKernel(this.onDidCreateKernel, this, this.disposables);
@@ -39,7 +40,7 @@ export class GeneratedCodeStorageManager implements IExtensionSyncActivationServ
     }
     private onDidCreateKernel(kernel: IKernel) {
         const notebook = kernel.notebook;
-        if (kernel.creator !== 'jupyterExtension' || notebook.notebookType !== InteractiveWindowView) {
+        if (kernel.creator !== 'jupyterExtension' || this.replTracker.isForReplEditor(notebook)) {
             return;
         }
         // Possible we changed kernels for the same document.

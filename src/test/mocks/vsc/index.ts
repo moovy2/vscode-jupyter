@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 /* eslint-disable no-invalid-this, @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any, max-classes-per-file */
 
 import { EventEmitter as NodeEventEmitter } from 'events';
@@ -230,9 +228,9 @@ export namespace vscMock {
 
         public appendText(value: string): MarkdownString {
             // escape markdown syntax tokens: http://daringfireball.net/projects/markdown/syntax#backslash
-            this.value += (this.supportThemeIcons ? escapeCodicons(value) : value)
-                .replace(/[\\`*_{}[\]()#+\-.!]/g, '\\$&')
-                .replace(/\n/, '\n\n');
+            this.value += (this.supportThemeIcons ? escapeCodicons(value) : value) // CodeQL [SM02383] Non production (mock) code used only for tests.
+                .replace(/[\\`*_{}[\]()#+\-.!]/g, '\\$&') // CodeQL [SM02383] Non production (mock) code used only for tests.
+                .replace(/\n/, '\n\n'); // CodeQL [SM02383] Non production (mock) code used only for tests.
 
             return this;
         }
@@ -290,7 +288,7 @@ export namespace vscMock {
         public static readonly SourceOrganizeImports: CodeActionKind = new CodeActionKind('source.organize.imports');
         public static readonly SourceFixAll: CodeActionKind = new CodeActionKind('source.fix.all');
         public static readonly RefactorMove: CodeActionKind = new CodeActionKind('refactor.move');
-
+        static readonly Notebook: CodeActionKind;
         private constructor(private _value: string) {}
 
         public append(parts: string): CodeActionKind {
@@ -316,7 +314,10 @@ export namespace vscMock {
     }
 
     export class DebugAdapterServer {
-        constructor(public readonly port: number, public readonly host?: string) {}
+        constructor(
+            public readonly port: number,
+            public readonly host?: string
+        ) {}
     }
     export class DebugAdapterExecutable {
         constructor(

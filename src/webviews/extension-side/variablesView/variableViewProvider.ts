@@ -1,24 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { inject, injectable, named } from 'inversify';
 import { CancellationToken, WebviewView, WebviewViewResolveContext } from 'vscode';
 import { IJupyterVariables } from '../../../kernels/variables/types';
-import {
-    IWorkspaceService,
-    IWebviewViewProvider,
-    IApplicationShell,
-    ICommandManager,
-    IDocumentManager
-} from '../../../platform/common/application/types';
+import { IWebviewViewProvider } from '../../../platform/common/application/types';
 import { Identifiers, isTestExecution } from '../../../platform/common/constants';
 import { IConfigurationService, IDisposableRegistry, IExtensionContext } from '../../../platform/common/types';
 import { createDeferred, Deferred } from '../../../platform/common/utils/async';
-import { IJupyterVariableDataProviderFactory, IDataViewerFactory } from '../dataviewer/types';
 import { INotebookWatcher, IVariableViewProvider } from './types';
 import { VariableView } from './variableView';
+import { DataViewerDelegator } from '../dataviewer/dataViewerDelegator';
 
 // This class creates our UI for our variable view and links it to the vs code webview view
 @injectable()
@@ -46,18 +38,12 @@ export class VariableViewProvider implements IVariableViewProvider {
 
     constructor(
         @inject(IConfigurationService) private readonly configuration: IConfigurationService,
-        @inject(IWorkspaceService) private readonly workspaceService: IWorkspaceService,
         @inject(IWebviewViewProvider) private readonly webviewViewProvider: IWebviewViewProvider,
         @inject(IExtensionContext) private readonly context: IExtensionContext,
         @inject(IJupyterVariables) @named(Identifiers.ALL_VARIABLES) private variables: IJupyterVariables,
         @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry,
-        @inject(IApplicationShell) private readonly appShell: IApplicationShell,
-        @inject(IJupyterVariableDataProviderFactory)
-        private readonly jupyterVariableDataProviderFactory: IJupyterVariableDataProviderFactory,
-        @inject(IDataViewerFactory) private readonly dataViewerFactory: IDataViewerFactory,
         @inject(INotebookWatcher) private readonly notebookWatcher: INotebookWatcher,
-        @inject(ICommandManager) private readonly commandManager: ICommandManager,
-        @inject(IDocumentManager) private readonly documentManager: IDocumentManager
+        @inject(DataViewerDelegator) private readonly dataViewerDelegator: DataViewerDelegator
     ) {}
 
     public async resolveWebviewView(
@@ -70,17 +56,12 @@ export class VariableViewProvider implements IVariableViewProvider {
         // Create our actual variable view
         this.variableView = new VariableView(
             this.configuration,
-            this.workspaceService,
             this.webviewViewProvider,
             this.context,
             this.variables,
             this.disposables,
-            this.appShell,
-            this.jupyterVariableDataProviderFactory,
-            this.dataViewerFactory,
             this.notebookWatcher,
-            this.commandManager,
-            this.documentManager
+            this.dataViewerDelegator
         );
 
         // If someone is waiting for the variable view resolve that here

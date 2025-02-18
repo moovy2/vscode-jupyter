@@ -1,7 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import type { IDisposable } from '../types';
+import { noop } from './misc';
+import { MicrotaskDelay } from './symbols';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type PromiseFunction = (...any: any[]) => Promise<any>;
@@ -9,24 +13,6 @@ export type PromiseFunction = (...any: any[]) => Promise<any>;
 export async function sleep(timeout: number): Promise<number> {
     return new Promise<number>((resolve) => {
         setTimeout(() => resolve(timeout), timeout);
-    });
-}
-
-export async function waitForPromise<T>(promise: Promise<T>, timeout: number): Promise<T | null> {
-    // Set a timer that will resolve with null
-    return new Promise<T | null>((resolve, reject) => {
-        const timer = setTimeout(() => resolve(null), timeout);
-        promise
-            .then((result) => {
-                // When the promise resolves, make sure to clear the timer or
-                // the timer may stick around causing tests to wait
-                clearTimeout(timer);
-                resolve(result);
-            })
-            .catch((e) => {
-                clearTimeout(timer);
-                reject(e);
-            });
     });
 }
 
@@ -56,9 +42,41 @@ export async function waitForCondition(
     });
 }
 
+export function raceTimeout<T>(timeout: number, ...promises: Promise<T>[]): Promise<T | undefined>;
+export function raceTimeout<T>(timeout: number, defaultValue: T, ...promises: Promise<T>[]): Promise<T>;
+export function raceTimeout<T>(timeout: number, defaultValue: T, ...promises: Promise<T>[]): Promise<T> {
+    const resolveValue = isPromiseLike(defaultValue) ? undefined : defaultValue;
+    if (isPromiseLike(defaultValue)) {
+        promises.push(defaultValue as unknown as Promise<T>);
+    }
+
+    let promiseResolve: ((value: T) => void) | undefined = undefined;
+
+    const timer = setTimeout(() => promiseResolve?.(resolveValue as unknown as T), timeout);
+
+    return Promise.race([
+        Promise.race(promises).finally(() => clearTimeout(timer)),
+        new Promise<T>((resolve) => (promiseResolve = resolve))
+    ]);
+}
+
+export function raceTimeoutError<T>(timeout: number, error: Error, ...promises: Promise<T>[]): Promise<T> {
+    let promiseReject: ((value: unknown) => void) | undefined = undefined;
+    const timer = setTimeout(() => promiseReject?.(error), timeout);
+
+    return Promise.race([
+        Promise.race(promises).finally(() => clearTimeout(timer)),
+        new Promise<T>((_, reject) => (promiseReject = reject))
+    ]);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function isPromise<T>(v: any): v is Promise<T> {
     return typeof v?.then === 'function' && typeof v?.catch === 'function';
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function isPromiseLike<T>(v: any): v is PromiseLike<T> {
+    return typeof v?.then === 'function';
 }
 
 //======================
@@ -125,142 +143,10 @@ export function createDeferred<T>(scope: any = null): Deferred<T> {
     return new DeferredImpl<T>(scope);
 }
 
-export function createDeferredFrom<T>(promise: Promise<T>): Deferred<T> {
-    const deferred = createDeferred<T>();
-    promise
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .then(deferred.resolve.bind(deferred) as any)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .catch(deferred.reject.bind(deferred) as any);
-
-    return deferred;
-}
 export function createDeferredFromPromise<T>(promise: Promise<T>): Deferred<T> {
     const deferred = createDeferred<T>();
     promise.then(deferred.resolve.bind(deferred)).catch(deferred.reject.bind(deferred));
     return deferred;
-}
-
-//================================
-// iterators
-
-/**
- * An iterator that yields nothing.
- */
-export function iterEmpty<T>(): AsyncIterator<T, void> {
-    // eslint-disable-next-line no-empty,@typescript-eslint/no-empty-function
-    return (async function* () {})() as unknown as AsyncIterator<T, void>;
-}
-
-type NextResult<T> = { index: number } & (
-    | { result: IteratorResult<T, T | void>; err: null }
-    | { result: null; err: Error }
-);
-async function getNext<T>(it: AsyncIterator<T, T | void>, indexMaybe?: number): Promise<NextResult<T>> {
-    const index = indexMaybe === undefined ? -1 : indexMaybe;
-    try {
-        const result = await it.next();
-        return { index, result, err: null };
-    } catch (err) {
-        return { index, err, result: null };
-    }
-}
-
-// eslint-disable-next-line no-empty,@typescript-eslint/no-empty-function
-export const NEVER: Promise<unknown> = new Promise(() => {});
-
-/**
- * Yield everything produced by the given iterators as soon as each is ready.
- *
- * When one of the iterators has something to yield then it gets yielded
- * right away, regardless of where the iterator is located in the array
- * of iterators.
- *
- * @param iterators - the async iterators from which to yield items
- * @param onError - called/awaited once for each iterator that fails
- */
-export async function* chain<T>(
-    iterators: AsyncIterator<T, T | void>[],
-    onError?: (err: Error, index: number) => Promise<void>
-    // Ultimately we may also want to support cancellation.
-): AsyncIterator<T, void> {
-    const promises = iterators.map(getNext);
-    let numRunning = iterators.length;
-    while (numRunning > 0) {
-        const { index, result, err } = await Promise.race(promises);
-        if (err !== null) {
-            promises[index] = NEVER as Promise<NextResult<T>>;
-            numRunning -= 1;
-            if (onError !== undefined) {
-                await onError(err, index);
-            }
-            // XXX Log the error.
-        } else if (result!.done) {
-            promises[index] = NEVER as Promise<NextResult<T>>;
-            numRunning -= 1;
-            // If R is void then result.value will be undefined.
-            if (result!.value !== undefined) {
-                yield result!.value;
-            }
-        } else {
-            promises[index] = getNext(iterators[index], index);
-            // Only the "return" result can be undefined (void),
-            // so we're okay here.
-            yield result!.value as T;
-        }
-    }
-}
-
-/**
- * Map the async function onto the items and yield the results.
- *
- * @param items - the items to map onto and iterate
- * @param func - the async function to apply for each item
- * @param race - if `true` (the default) then results are yielded
- *               potentially out of order, as soon as each is ready
- */
-export async function* mapToIterator<T, R = T>(
-    items: T[],
-    func: (item: T) => Promise<R>,
-    race = true
-): AsyncIterator<R, void> {
-    if (race) {
-        const iterators = items.map((item) => {
-            async function* generator() {
-                yield func(item);
-            }
-            return generator();
-        });
-        yield* iterable(chain(iterators));
-    } else {
-        yield* items.map(func);
-    }
-}
-
-/**
- * Convert an iterator into an iterable, if it isn't one already.
- */
-export function iterable<T>(iterator: AsyncIterator<T, void>): AsyncIterableIterator<T> {
-    const it = iterator as AsyncIterableIterator<T>;
-    if (it[Symbol.asyncIterator] === undefined) {
-        it[Symbol.asyncIterator] = () => it;
-    }
-    return it;
-}
-
-/**
- * Get everything yielded by the iterator.
- */
-export async function flattenIterator<T>(iterator: AsyncIterator<T, void>): Promise<T[]> {
-    const results: T[] = [];
-    // We are dealing with an iterator, not an iterable, so we have
-    // to iterate manually rather than with a for-await loop.
-    let result = await iterator.next();
-    while (!result.done) {
-        results.push(result.value);
-        result = await iterator.next();
-    }
-    return results;
 }
 
 /**
@@ -299,5 +185,265 @@ export class PromiseChain {
                 .catch((ex) => deferred.reject(ex))
         );
         return deferred.promise;
+    }
+}
+
+export interface ITask<T> {
+    (): T;
+}
+
+/**
+ * A helper to prevent accumulation of sequential async tasks.
+ *
+ * Imagine a mail man with the sole task of delivering letters. As soon as
+ * a letter submitted for delivery, he drives to the destination, delivers it
+ * and returns to his base. Imagine that during the trip, N more letters were submitted.
+ * When the mail man returns, he picks those N letters and delivers them all in a
+ * single trip. Even though N+1 submissions occurred, only 2 deliveries were made.
+ *
+ * The throttler implements this via the queue() method, by providing it a task
+ * factory. Following the example:
+ *
+ * 		const throttler = new Throttler();
+ * 		const letters = [];
+ *
+ * 		function deliver() {
+ * 			const lettersToDeliver = letters;
+ * 			letters = [];
+ * 			return makeTheTrip(lettersToDeliver);
+ * 		}
+ *
+ * 		function onLetterReceived(l) {
+ * 			letters.push(l);
+ * 			throttler.queue(deliver);
+ * 		}
+ */
+export class Throttler implements IDisposable {
+    private activePromise: Promise<any> | null;
+    private queuedPromise: Promise<any> | null;
+    private queuedPromiseFactory: ITask<Promise<any>> | null;
+
+    private isDisposed = false;
+
+    constructor() {
+        this.activePromise = null;
+        this.queuedPromise = null;
+        this.queuedPromiseFactory = null;
+    }
+
+    queue<T>(promiseFactory: ITask<Promise<T>>): Promise<T> {
+        if (this.isDisposed) {
+            return Promise.reject(new Error('Throttler is disposed'));
+        }
+
+        if (this.activePromise) {
+            this.queuedPromiseFactory = promiseFactory;
+
+            if (!this.queuedPromise) {
+                const onComplete = () => {
+                    this.queuedPromise = null;
+
+                    if (this.isDisposed) {
+                        return;
+                    }
+
+                    const result = this.queue(this.queuedPromiseFactory!);
+                    this.queuedPromiseFactory = null;
+
+                    return result;
+                };
+
+                this.queuedPromise = new Promise((resolve) => {
+                    void this.activePromise!.then(onComplete, onComplete).then(resolve);
+                });
+            }
+
+            return new Promise((resolve, reject) => {
+                this.queuedPromise!.then(resolve, reject);
+            });
+        }
+
+        this.activePromise = promiseFactory();
+
+        return new Promise((resolve, reject) => {
+            this.activePromise!.then(
+                (result: T) => {
+                    this.activePromise = null;
+                    resolve(result);
+                },
+                (err: unknown) => {
+                    this.activePromise = null;
+                    reject(err);
+                }
+            );
+        });
+    }
+
+    dispose(): void {
+        this.isDisposed = true;
+    }
+}
+
+interface IScheduledLater extends IDisposable {
+    isTriggered(): boolean;
+}
+
+const timeoutDeferred = (timeout: number, fn: () => void): IScheduledLater => {
+    let scheduled = true;
+    const handle = setTimeout(() => {
+        scheduled = false;
+        fn();
+    }, timeout);
+    return {
+        isTriggered: () => scheduled,
+        dispose: () => {
+            clearTimeout(handle);
+            scheduled = false;
+        }
+    };
+};
+
+const microtaskDeferred = (fn: () => void): IScheduledLater => {
+    let scheduled = true;
+    queueMicrotask(() => {
+        if (scheduled) {
+            scheduled = false;
+            fn();
+        }
+    });
+
+    return {
+        isTriggered: () => scheduled,
+        dispose: () => {
+            scheduled = false;
+        }
+    };
+};
+
+/**
+ * A helper to delay (debounce) execution of a task that is being requested often.
+ *
+ * Following the throttler, now imagine the mail man wants to optimize the number of
+ * trips proactively. The trip itself can be long, so he decides not to make the trip
+ * as soon as a letter is submitted. Instead he waits a while, in case more
+ * letters are submitted. After said waiting period, if no letters were submitted, he
+ * decides to make the trip. Imagine that N more letters were submitted after the first
+ * one, all within a short period of time between each other. Even though N+1
+ * submissions occurred, only 1 delivery was made.
+ *
+ * The delayer offers this behavior via the trigger() method, into which both the task
+ * to be executed and the waiting period (delay) must be passed in as arguments. Following
+ * the example:
+ *
+ * 		const delayer = new Delayer(WAITING_PERIOD);
+ * 		const letters = [];
+ *
+ * 		function letterReceived(l) {
+ * 			letters.push(l);
+ * 			delayer.trigger(() => { return makeTheTrip(); });
+ * 		}
+ */
+export class Delayer<T> implements IDisposable {
+    private deferred: IScheduledLater | null;
+    private completionPromise: Promise<any> | null;
+    private doResolve: ((value?: any | Promise<any>) => void) | null;
+    private doReject: ((err: any) => void) | null;
+    private task: ITask<T | Promise<T>> | null;
+
+    constructor(public defaultDelay: number | typeof MicrotaskDelay) {
+        this.deferred = null;
+        this.completionPromise = null;
+        this.doResolve = null;
+        this.doReject = null;
+        this.task = null;
+    }
+
+    trigger(task: ITask<T | Promise<T>>, delay = this.defaultDelay): Promise<T> {
+        this.task = task;
+        this.cancelTimeout();
+
+        if (!this.completionPromise) {
+            this.completionPromise = new Promise((resolve, reject) => {
+                this.doResolve = resolve;
+                this.doReject = reject;
+            }).then(() => {
+                this.completionPromise = null;
+                this.doResolve = null;
+                if (this.task) {
+                    const task = this.task;
+                    this.task = null;
+                    return task();
+                }
+                return undefined;
+            });
+            void this.completionPromise.catch(noop);
+        }
+
+        const fn = () => {
+            this.deferred = null;
+            this.doResolve?.(null);
+        };
+
+        this.deferred = delay === MicrotaskDelay ? microtaskDeferred(fn) : timeoutDeferred(delay, fn);
+
+        return this.completionPromise;
+    }
+
+    isTriggered(): boolean {
+        return !!this.deferred?.isTriggered();
+    }
+
+    cancel(): void {
+        this.cancelTimeout();
+
+        if (this.completionPromise) {
+            this.doReject?.(new Error('Canceled'));
+            this.completionPromise = null;
+        }
+    }
+
+    private cancelTimeout(): void {
+        this.deferred?.dispose();
+        this.deferred = null;
+    }
+
+    dispose(): void {
+        this.cancel();
+    }
+}
+
+/**
+ * A helper to delay execution of a task that is being requested often, while
+ * preventing accumulation of consecutive executions, while the task runs.
+ *
+ * The mail man is clever and waits for a certain amount of time, before going
+ * out to deliver letters. While the mail man is going out, more letters arrive
+ * and can only be delivered once he is back. Once he is back the mail man will
+ * do one more trip to deliver the letters that have accumulated while he was out.
+ */
+export class ThrottledDelayer<T> {
+    private delayer: Delayer<Promise<T>>;
+    private throttler: Throttler;
+
+    constructor(defaultDelay: number) {
+        this.delayer = new Delayer(defaultDelay);
+        this.throttler = new Throttler();
+    }
+
+    trigger(promiseFactory: ITask<Promise<T>>, delay?: number): Promise<T> {
+        return this.delayer.trigger(() => this.throttler.queue(promiseFactory), delay) as unknown as Promise<T>;
+    }
+
+    isTriggered(): boolean {
+        return this.delayer.isTriggered();
+    }
+
+    cancel(): void {
+        this.delayer.cancel();
+    }
+
+    dispose(): void {
+        this.delayer.dispose();
+        this.throttler.dispose();
     }
 }

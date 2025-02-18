@@ -1,46 +1,31 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import '../../common/extensions';
+import { Position, Range, TextEditor, Uri, window, workspace } from 'vscode';
 
-import { Position, Range, TextEditor, Uri } from 'vscode';
-
-import { IApplicationShell, IDocumentManager } from '../../common/application/types';
 import { PYTHON_LANGUAGE } from '../../common/constants';
-import { IServiceContainer } from '../../ioc/types';
 import { ICodeExecutionHelper } from '../types';
 import { noop } from '../../common/utils/misc';
+import { dedentCode } from '../../common/helpers';
+import { injectable } from 'inversify';
 
 /**
  * Handles trimming code sent to a terminal so it actually runs.
  */
-export class CodeExecutionHelperBase implements ICodeExecutionHelper {
-    protected readonly documentManager: IDocumentManager;
-    private readonly applicationShell: IApplicationShell;
-
-    constructor(serviceContainer: IServiceContainer) {
-        this.documentManager = serviceContainer.get<IDocumentManager>(IDocumentManager);
-        this.applicationShell = serviceContainer.get<IApplicationShell>(IApplicationShell);
-    }
-
-    public async normalizeLines(_code: string, _resource?: Uri): Promise<string> {
-        throw Error('Not Implemented');
-    }
-
+@injectable()
+export class CodeExecutionHelper implements ICodeExecutionHelper {
     public async getFileToExecute(): Promise<Uri | undefined> {
-        const activeEditor = this.documentManager.activeTextEditor;
+        const activeEditor = window.activeTextEditor;
         if (!activeEditor) {
-            this.applicationShell.showErrorMessage('No open file to run in terminal').then(noop, noop);
+            window.showErrorMessage('No open file to run in terminal').then(noop, noop);
             return;
         }
         if (activeEditor.document.isUntitled) {
-            this.applicationShell
-                .showErrorMessage('The active file needs to be saved before it can be run')
-                .then(noop, noop);
+            window.showErrorMessage('The active file needs to be saved before it can be run').then(noop, noop);
             return;
         }
         if (activeEditor.document.languageId !== PYTHON_LANGUAGE) {
-            this.applicationShell.showErrorMessage('The active file is not a Python source file').then(noop, noop);
+            window.showErrorMessage('The active file is not a Python source file').then(noop, noop);
             return;
         }
         if (activeEditor.document.isDirty) {
@@ -63,11 +48,12 @@ export class CodeExecutionHelperBase implements ICodeExecutionHelper {
         } else {
             code = this.getMultiLineSelectionText(textEditor);
         }
-        return code;
+
+        return dedentCode(code.trimEnd());
     }
 
     public async saveFileIfDirty(file: Uri): Promise<void> {
-        const docs = this.documentManager.textDocuments.filter((d) => d.uri.path === file.path);
+        const docs = workspace.textDocuments.filter((d) => d.uri.path === file.path);
         if (docs.length === 1 && docs[0].isDirty) {
             await docs[0].save();
         }
@@ -154,8 +140,8 @@ export class CodeExecutionHelperBase implements ICodeExecutionHelper {
         //     if (m == 0):
         //         return n + 1
         //                ↑<------------------- To here (notice " + 1" is not selected)
-        if (selectionFirstLineText.trimLeft() === fullStartLineText.trimLeft()) {
-            return fullStartLineText + selectionText.substr(selectionFirstLineText.length);
+        if (selectionFirstLineText.trimStart() === fullStartLineText.trimStart()) {
+            return fullStartLineText + selectionText.substring(selectionFirstLineText.length);
         }
 
         // If you are here then user has selected partial start and partial end lines:

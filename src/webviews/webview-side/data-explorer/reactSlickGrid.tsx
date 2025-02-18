@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import { KeyCodes } from '../react-common/constants';
@@ -93,7 +91,10 @@ class ColumnFilter {
     private equalToRegEx = /^\s*(?:=|==)\s*((?<Number>-?\d+.*)|(?<NaN>nan)|(?<Inf>inf)|(?<NegInf>-inf)).*/i;
     private textRegex: RegExp | undefined;
 
-    constructor(public text: string, column: Slick.Column<Slick.SlickData>) {
+    constructor(
+        public text: string,
+        column: Slick.Column<Slick.SlickData>
+    ) {
         if (text && text.length > 0) {
             const columnType = (column as any).type;
             switch (columnType) {
@@ -499,13 +500,13 @@ export class ReactSlickGrid extends React.Component<ISlickGridProps, ISlickGridS
                                 cssClass: 'codicon codicon-filter codicon-button header-cell-button',
                                 handler: this.clickFilterButton,
                                 tooltip: this.state.showingFilters
-                                    ? getLocString('DataScience.dataViewerHideFilters', 'Hide filters')
-                                    : getLocString('DataScience.dataViewerShowFilters', 'Show filters')
+                                    ? getLocString('dataViewerHideFilters', 'Hide filters')
+                                    : getLocString('dataViewerShowFilters', 'Show filters')
                             },
                             {
                                 cssClass: 'codicon codicon-refresh codicon-button header-cell-button refresh-button',
                                 handler: this.props.handleRefreshRequest,
-                                tooltip: getLocString('DataScience.refreshDataViewer', 'Refresh data viewer')
+                                tooltip: getLocString('refreshDataViewer', 'Refresh data viewer')
                             }
                         ]
                     };
@@ -594,7 +595,7 @@ export class ReactSlickGrid extends React.Component<ISlickGridProps, ISlickGridS
 
     private renderFilterCell = (_e: Slick.EventData, args: Slick.OnHeaderRowCellRenderedEventArgs<Slick.SlickData>) => {
         if (args.column.field === this.props.idProperty) {
-            const tooltipText = getLocString('DataScience.clearFilters', 'Clear all filters');
+            const tooltipText = getLocString('clearFilters', 'Clear all filters');
             ReactDOM.render(
                 <div
                     className="codicon codicon-clear-all codicon-button"

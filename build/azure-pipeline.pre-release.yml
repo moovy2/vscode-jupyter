@@ -5,7 +5,6 @@ pr: none
 schedules:
   - cron: '0 9 * * 1-5' # 9am UTC, Monday-Friday (2am PDT, after VS Code pre-release builds which is 11pm PDT)
     displayName: Nightly Release Schedule
-    always: true
     branches:
       include:
         - main
@@ -18,21 +17,55 @@ resources:
       ref: main
       endpoint: Monaco
 
+parameters:
+  - name: publishExtension
+    displayName: 🚀 Publish Extension
+    type: boolean
+    default: false
 
 extends:
   template: azure-pipelines/extension/pre-release.yml@templates
   parameters:
-    locTsConfigs: $(Build.SourcesDirectory)/tsconfig.json
-    locBundleDestination: $(Build.SourcesDirectory)/out
+    ghCreateTag: false
+    standardizedVersioning: true
+    l10nSourcePaths: ./src
+    buildPlatforms:
+      - name: Linux
+        vsceTarget: 'web'
+      - name: Linux
+        packageArch: arm64
+        vsceTarget: linux-arm64
+      - name: Linux
+        packageArch: arm
+        vsceTarget: linux-armhf
+      - name: Linux
+        vsceTarget: alpine-x64
+      - name: Linux
+        vsceTarget: alpine-arm64
+      - name: Linux
+        packageArch: x64
+        vsceTarget: linux-x64
+      - name: MacOS
+        packageArch: arm64
+        vsceTarget: darwin-arm64
+      - name: MacOS
+        packageArch: x64
+        vsceTarget: darwin-x64
+      - name: Windows
+        packageArch: x64
+        vsceTarget: win32-x64
+      - name: Windows
+        packageArch: arm64
+        vsceTarget: win32-arm64
     buildSteps:
-      - script: npm i -g npm@8.15.1
-        displayName: Install npm 8.15.1
+      - script: |
+          sudo apt-get update
+          sudo apt-get install libpango1.0-dev libgif-dev
+        displayName: Install zmq dependencies
+        condition: or(eq(variables.vsceTarget, ''), contains(variables.vsceTarget, 'linux'), contains(variables.vsceTarget, 'alpine'))
 
-      - script: npm ci
-        displayName: Install dependencies
-
-      - script: gulp clean
-        displayName: Clean
+      - script: npm i -g npm@10.8.2
+        displayName: npm 10.8.2
 
       - task: UsePythonVersion@0
         inputs:
@@ -40,11 +73,24 @@ extends:
           addToPath: true
           architecture: 'x64'
 
-      - script: python -m pip --disable-pip-version-check install -t ./pythonFiles/lib/python --no-cache-dir --implementation py --no-deps --upgrade -r ./requirements.txt
-        displayName: Install Python libs
+      - script: npm ci --foreground-scripts
+        displayName: npm ci
+        env:
+          npm_config_build_from_source: true
+          VSC_VSCE_TARGET: $(vsceTarget)
 
-      - script: npm run updateBuildNumber
-        displayName: Update build number
+      - script: npm run clean
+        displayName: Clean
 
       - script: npm run prePublishBundlePreRelease
         displayName: Build
+        env:
+          VSC_VSCE_TARGET: $(vsceTarget)
+
+    tsa:
+      config:
+        areaPath: 'Visual Studio Code Jupyter Extensions'
+        serviceTreeID: '14f24efd-b502-422a-9f40-09ea7ce9cf14'
+      enabled: true
+
+    publishExtension: ${{ parameters.publishExtension }}

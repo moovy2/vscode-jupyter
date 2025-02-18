@@ -1,27 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import * as path from '../../../platform/vscode-path/path';
 import * as uriPath from '../../../platform/vscode-path/resources';
-import { CancellationToken, Memento, Uri } from 'vscode';
+import { CancellationToken, Disposable, Event, EventEmitter, Memento, Uri } from 'vscode';
 import { IPythonExtensionChecker } from '../../../platform/api/types';
-import { IApplicationEnvironment, IWorkspaceService } from '../../../platform/common/application/types';
+import { IApplicationEnvironment } from '../../../platform/common/application/types';
 import { PYTHON_LANGUAGE } from '../../../platform/common/constants';
-import { traceInfo, traceVerbose, traceError, traceDecoratorError } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { getDisplayPath } from '../../../platform/common/platform/fs-paths';
 import { IFileSystemNode } from '../../../platform/common/platform/types.node';
 import { IDisposable, IDisposableRegistry, ReadWrite } from '../../../platform/common/types';
-import { isUri, noop } from '../../../platform/common/utils/misc';
+import { noop } from '../../../platform/common/utils/misc';
 import { PythonEnvironment } from '../../../platform/pythonEnvironments/info';
+import { getInterpreterKernelSpecName, getKernelRegistrationInfo } from '../../../kernels/helpers';
 import {
-    deserializeKernelConnection,
-    getInterpreterKernelSpecName,
-    getKernelRegistrationInfo,
-    serializeKernelConnection
-} from '../../../kernels/helpers';
-import {
+    BaseKernelConnectionMetadata,
     IJupyterKernelSpec,
     LocalKernelConnectionMetadata,
     LocalKernelSpecConnectionMetadata,
@@ -29,25 +23,24 @@ import {
 } from '../../../kernels/types';
 import { JupyterKernelSpec } from '../../jupyter/jupyterKernelSpec';
 import { getComparisonKey } from '../../../platform/vscode-path/resources';
-import { removeOldCachedItems } from '../../common/commonFinder';
-// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-const flatten = require('lodash/flatten') as typeof import('lodash/flatten');
+import { PromiseMonitor } from '../../../platform/common/utils/promises';
+import { dispose } from '../../../platform/common/utils/lifecycle';
+import { JupyterPaths } from './jupyterPaths.node';
+import { isCondaEnvironmentWithoutPython } from '../../../platform/interpreter/helpers';
+import { once } from '../../../platform/common/utils/functional';
 
-type KernelSpecFileWithContainingInterpreter = { interpreter?: PythonEnvironment; kernelSpecFile: Uri };
+export type KernelSpecFileWithContainingInterpreter = { interpreter?: PythonEnvironment; kernelSpecFile: Uri };
 export const isDefaultPythonKernelSpecSpecName = /python\s\d*.?\d*$/;
 export const oldKernelsSpecFolderName = '__old_vscode_kernelspecs';
 
 /**
  * Base class for searching for local kernels that are based on a kernel spec file.
  */
-export abstract class LocalKernelSpecFinderBase<
-    T extends LocalKernelSpecConnectionMetadata | PythonKernelConnectionMetadata
-> implements IDisposable
-{
+export class LocalKernelSpecFinder implements IDisposable {
     private _oldKernelSpecsFolder?: string;
-    private findKernelSpecsInPathCache = new Map<string, Promise<KernelSpecFileWithContainingInterpreter[]>>();
+    private findKernelSpecsInPathCache = new Map<string, Promise<Uri[]>>();
 
-    protected get oldKernelSpecsFolder() {
+    public get oldKernelSpecsFolder() {
         return this._oldKernelSpecsFolder || this.globalState.get<string>('OLD_KERNEL_SPECS_FOLDER__', '');
     }
     private set oldKernelSpecsFolder(value: string) {
@@ -55,125 +48,254 @@ export abstract class LocalKernelSpecFinderBase<
         this.globalState.update('OLD_KERNEL_SPECS_FOLDER__', value).then(noop, noop);
     }
     private cache?: KernelSpecFileWithContainingInterpreter[];
-    // Store our results when listing all possible kernelspecs for a resource
-    private kernelSpecCache = new Map<
-        string,
-        {
-            usesPython: boolean;
-            wasPythonExtInstalled: boolean;
-            promise: Promise<T[]>;
-        }
-    >();
-
     // Store any json file that we have loaded from disk before
     private pathToKernelSpec = new Map<string, Promise<IJupyterKernelSpec | undefined>>();
+    private readonly disposables: IDisposable[] = [];
+    constructor(
+        private readonly fs: IFileSystemNode,
+        private readonly globalState: Memento,
+        private readonly jupyterPaths: JupyterPaths
+    ) {
+        if (this.oldKernelSpecsFolder) {
+            logger.trace(
+                `Old kernelSpecs (created by Jupyter Extension) stored in directory ${this.oldKernelSpecsFolder}`
+            );
+        }
+    }
+    public clearCache() {
+        this.pathToKernelSpec.clear();
+        this.findKernelSpecsInPathCache.clear();
+    }
+    public dispose() {
+        dispose(this.disposables);
+    }
+    /**
+     * Load the IJupyterKernelSpec for a given spec path, check the ones that we have already loaded first
+     */
+    public async loadKernelSpec(
+        specPath: Uri,
+        cancelToken: CancellationToken,
+        interpreter?: PythonEnvironment
+    ): Promise<IJupyterKernelSpec | undefined> {
+        // This is a backup folder for old kernels created by us.
+        if (specPath.fsPath.includes(oldKernelsSpecFolderName)) {
+            return;
+        }
+        const key = getComparisonKey(specPath);
+        // If we have not already loaded this kernel spec, then load it
+        if (!this.pathToKernelSpec.has(key)) {
+            const promise = this.loadKernelSpecImpl(specPath, cancelToken, interpreter).then(async (kernelSpec) => {
+                const globalSpecRootPath = await this.jupyterPaths.getKernelSpecRootPath();
+                // Delete old kernelSpecs that we created in the global kernelSpecs folder.
+                const shouldDeleteKernelSpec =
+                    kernelSpec &&
+                    globalSpecRootPath &&
+                    getKernelRegistrationInfo(kernelSpec) &&
+                    kernelSpec.specFile &&
+                    uriPath.isEqualOrParent(Uri.file(kernelSpec.specFile), globalSpecRootPath);
+                if (kernelSpec && !shouldDeleteKernelSpec) {
+                    return kernelSpec;
+                }
+                if (kernelSpec?.specFile && shouldDeleteKernelSpec) {
+                    // If this kernelSpec was registered by us and is in the global kernels folder,
+                    // then remove it.
+                    this.deleteOldKernelSpec(kernelSpec.specFile).catch(noop);
+                }
 
+                // If we failed to get a kernelSpec full path from our cache and loaded list
+                if (this.pathToKernelSpec.get(key) === promise) {
+                    this.pathToKernelSpec.delete(key);
+                }
+                this.cache = this.cache?.filter((itemPath) => uriPath.isEqual(itemPath.kernelSpecFile, specPath));
+                return undefined;
+            });
+            this.pathToKernelSpec.set(key, promise);
+            promise
+                .finally(() => {
+                    if (cancelToken.isCancellationRequested && this.pathToKernelSpec.get(key) === promise) {
+                        this.pathToKernelSpec.delete(key);
+                    }
+                })
+                .catch(noop);
+        }
+        // ! as the has and set above verify that we have a return here
+        return this.pathToKernelSpec.get(key)!;
+    }
+
+    private async deleteOldKernelSpec(kernelSpecFile: string) {
+        // Just copy this folder into a seprate location.
+        const kernelSpecFolderName = path.basename(path.dirname(kernelSpecFile));
+        const destinationFolder = path.join(path.dirname(path.dirname(kernelSpecFile)), oldKernelsSpecFolderName);
+        this.oldKernelSpecsFolder = destinationFolder;
+        const destinationFile = path.join(destinationFolder, kernelSpecFolderName, path.basename(kernelSpecFile));
+        await this.fs.createDirectory(Uri.file(path.dirname(destinationFile)));
+        await this.fs.copy(Uri.file(kernelSpecFile), Uri.file(destinationFile)).catch(noop);
+        await this.fs.delete(Uri.file(kernelSpecFile));
+        logger.trace(`Old KernelSpec '${kernelSpecFile}' deleted and backup stored in ${destinationFolder}`);
+    }
+    /**
+     * Load kernelspec json from disk
+     */
+    private async loadKernelSpecImpl(
+        specPath: Uri,
+        cancelToken: CancellationToken,
+        interpreter?: PythonEnvironment
+    ): Promise<IJupyterKernelSpec | undefined> {
+        return loadKernelSpec(specPath, this.fs, cancelToken, interpreter);
+    }
+    // Given a set of paths, search for kernel.json files and return back the full paths of all of them that we find
+    public async findKernelSpecsInPaths(kernelSearchPath: Uri, cancelToken: CancellationToken): Promise<Uri[]> {
+        const cacheKey = getComparisonKey(kernelSearchPath);
+
+        const previousPromise = this.findKernelSpecsInPathCache.get(cacheKey);
+        if (previousPromise) {
+            return previousPromise;
+        }
+        const promise = (async () => {
+            if (await this.fs.exists(kernelSearchPath)) {
+                if (cancelToken.isCancellationRequested) {
+                    return [];
+                }
+                const files = await this.fs.searchLocal(`**/kernel.json`, kernelSearchPath.fsPath, true);
+                return files.map((item) => uriPath.joinPath(kernelSearchPath, item));
+            } else {
+                return [];
+            }
+        })();
+        this.findKernelSpecsInPathCache.set(cacheKey, promise);
+        const disposable = cancelToken.onCancellationRequested(() => {
+            if (this.findKernelSpecsInPathCache.get(cacheKey) === promise) {
+                this.findKernelSpecsInPathCache.delete(cacheKey);
+            }
+        });
+        promise
+            .finally(() => {
+                if (cancelToken.isCancellationRequested && this.findKernelSpecsInPathCache.get(cacheKey) === promise) {
+                    this.findKernelSpecsInPathCache.delete(cacheKey);
+                }
+                disposable.dispose();
+            })
+            .catch(noop);
+        promise.catch((ex) => {
+            if (this.findKernelSpecsInPathCache.get(cacheKey) === promise) {
+                this.findKernelSpecsInPathCache.delete(cacheKey);
+            }
+            logger.warn(`Failed to search for kernels in ${getDisplayPath(kernelSearchPath)} with an error`, ex);
+        });
+        return promise;
+    }
+}
+export interface ILocalKernelFinder<T extends LocalKernelSpecConnectionMetadata | PythonKernelConnectionMetadata> {
+    readonly status: 'discovering' | 'idle';
+    onDidChangeStatus: Event<void>;
+    onDidChangeKernels: Event<void>;
+    refresh(): Promise<void>;
+    readonly kernels: T[];
+}
+/**
+ * Base class for searching for local kernels that are based on a kernel spec file.
+ */
+export abstract class LocalKernelSpecFinderBase<
+        T extends LocalKernelSpecConnectionMetadata | PythonKernelConnectionMetadata
+    >
+    implements IDisposable, ILocalKernelFinder<T>
+{
+    protected readonly disposables: IDisposable[] = [];
+
+    private _status: 'discovering' | 'idle' = 'idle';
+    public get status() {
+        return this._status;
+    }
+    private set status(value: typeof this._status) {
+        if (this._status === value) {
+            return;
+        }
+        this._status = value;
+        this._onDidChangeStatus.fire();
+    }
+    protected readonly promiseMonitor = new PromiseMonitor();
+    private readonly _onDidChangeStatus = new EventEmitter<void>();
+    public readonly onDidChangeStatus = this._onDidChangeStatus.event;
+    protected readonly _onDidChangeKernels = new EventEmitter<void>();
+    public readonly onDidChangeKernels = this._onDidChangeKernels.event;
+    protected readonly kernelSpecFinder: LocalKernelSpecFinder;
     constructor(
         protected readonly fs: IFileSystemNode,
-        protected readonly workspaceService: IWorkspaceService,
         protected readonly extensionChecker: IPythonExtensionChecker,
-        protected readonly globalState: Memento,
+        protected readonly memento: Memento,
         disposables: IDisposableRegistry,
-        private readonly env: IApplicationEnvironment
+        private readonly env: IApplicationEnvironment,
+        protected readonly jupyterPaths: JupyterPaths
     ) {
         disposables.push(this);
+        this.disposables.push(this.promiseMonitor);
+        this.promiseMonitor.onStateChange(() => {
+            this.status = this.promiseMonitor.isComplete ? 'idle' : 'discovering';
+        });
+        this.kernelSpecFinder = new LocalKernelSpecFinder(fs, memento, jupyterPaths);
+        this.disposables.push(this.kernelSpecFinder);
+        this.disposables.push(new Disposable(() => dispose(Array.from(this.timeouts.values()))));
     }
-
+    public clearCache() {
+        this.kernelSpecFinder.clearCache();
+    }
     public abstract dispose(): void | undefined;
-    /**
-     * @param {boolean} dependsOnPythonExtension Whether this list of kernels fetched depends on whether the python extension is installed/not installed.
-     * If for instance first Python Extension isn't installed, then we call this again, after installing it, then the cache will be blown away
-     */
-    @traceDecoratorError('List kernels failed')
-    protected async listKernelsWithCache(
-        cacheKey: string,
-        dependsOnPythonExtension: boolean,
-        finder: () => Promise<T[]>,
-        ignoreCache?: boolean
-    ): Promise<T[]> {
-        // If we have already searched for this resource, then use that.
-        const result = this.kernelSpecCache.get(cacheKey);
-        if (result && !ignoreCache) {
-            // If python extension is now installed & was not installed previously, then ignore the previous cache.
-            if (
-                result.usesPython &&
-                result.wasPythonExtInstalled === this.extensionChecker.isPythonExtensionInstalled
-            ) {
-                return result.promise;
-            } else if (!result.usesPython) {
-                return result.promise;
-            }
-        }
-        const promise = finder().then((items) => {
-            const distinctKernelMetadata = new Map<string, T>();
-            items.map((kernelSpec) => {
-                // Check if we have already seen this.
-                if (!distinctKernelMetadata.has(kernelSpec.id)) {
-                    distinctKernelMetadata.set(kernelSpec.id, kernelSpec);
-                }
-            });
+    abstract refresh(): Promise<void>;
+    abstract get kernels(): T[];
 
-            return Array.from(distinctKernelMetadata.values()).sort((a, b) => {
-                const nameA = a.kernelSpec.display_name.toUpperCase();
-                const nameB = b.kernelSpec.display_name.toUpperCase();
-                if (nameA === nameB) {
-                    return 0;
-                } else if (nameA < nameB) {
-                    return -1;
-                } else {
-                    return 1;
-                }
-            });
-        });
-        // Keep track of whether Python extension was installed or not when fetching this list of kernels.
-        // Next time if its installed then we can ignore this cache.
-        const wasPythonExtInstalled = this.extensionChecker.isPythonExtensionInstalled;
-        this.kernelSpecCache.set(cacheKey, { usesPython: dependsOnPythonExtension, promise, wasPythonExtInstalled });
-
-        // ! as the has and set above verify that we have a return here
-        return this.kernelSpecCache.get(cacheKey)!.promise;
-    }
     protected async listKernelsFirstTimeFromMemento(cacheKey: string): Promise<T[]> {
-        // Check memento too
-        const cache = this.globalState.get<{ kernels: T[]; extensionVersion: string }>(cacheKey, {
-            kernels: [],
-            extensionVersion: ''
-        });
+        const promise = (async () => {
+            // Check memento too
+            const jsonStr = this.memento.get<string>(
+                cacheKey,
+                JSON.stringify({
+                    kernels: [],
+                    extensionVersion: ''
+                })
+            );
+            const cache: { kernels: T[]; extensionVersion: string } = JSON.parse(jsonStr);
+            let kernels: T[] = [];
+            /**
+             * The cached list of raw kernels is pointing to kernelSpec.json files in the extensions directory.
+             * Assume you have version 1 of extension installed.
+             * Now you update to version 2, at this point the cache still points to version 1 and the kernelSpec.json files are in the directory version 1.
+             * Those files in directory for version 1 could get deleted by VS Code at any point in time, as thats an old version of the extension and user has now installed version 2.
+             * Hence its wrong and buggy to use those files.
+             * To ensure we don't run into weird issues with the use of cached kernelSpec.json files, we ensure the cache is tied to each version of the extension.
+             */
+            if (cache && Array.isArray(cache.kernels) && cache.extensionVersion === this.env.extensionVersion) {
+                kernels = cache.kernels.map((item) => BaseKernelConnectionMetadata.fromJSON(item)) as T[];
+            }
 
-        let kernels: T[] = [];
-        /**
-         * The cached list of raw kernels is pointing to kernelSpec.json files in the extensions directory.
-         * Assume you have version 1 of extension installed.
-         * Now you update to version 2, at this point the cache still points to version 1 and the kernelSpec.json files are in the directory version 1.
-         * Those files in directory for version 1 could get deleted by VS Code at any point in time, as thats an old version of the extension and user has now installed version 2.
-         * Hence its wrong and buggy to use those files.
-         * To ensure we don't run into weird issues with the use of cached kernelSpec.json files, we ensure the cache is tied to each version of the extension.
-         */
-        if (cache && Array.isArray(cache.kernels) && cache.extensionVersion === this.env.extensionVersion) {
-            kernels = cache.kernels.map(deserializeKernelConnection) as T[];
-        }
+            // Validate
+            const validValues: T[] = [];
+            await Promise.all(
+                kernels.map(async (item) => {
+                    if (await this.isValidCachedKernel(item)) {
+                        validValues.push(item);
+                    }
+                })
+            );
+            return validValues;
+        })();
 
-        // Validate
-        const validValues: T[] = [];
-        await Promise.all(
-            kernels.map(async (item) => {
-                if (await this.isValidCachedKernel(item)) {
-                    validValues.push(item);
-                }
-            })
-        );
-        return validValues;
+        this.promiseMonitor.push(promise);
+        return promise;
     }
-
-    protected async writeToMementoCache(values: T[], cacheKey: string) {
-        const serialized = values.map(serializeKernelConnection);
-        await Promise.all([
-            removeOldCachedItems(this.globalState),
-            this.globalState.update(cacheKey, {
-                kernels: serialized,
-                extensionVersion: this.env.extensionVersion
-            })
-        ]);
+    private timeouts = new Map<string, IDisposable>();
+    protected writeToMementoCache(values: T[], cacheKey: string) {
+        this.timeouts.get(cacheKey)?.dispose();
+        // This can get called very quickly and very often.
+        const timer = setTimeout(() => {
+            void this.memento.update(
+                cacheKey,
+                JSON.stringify({
+                    kernels: values.map((item) => item.toJSON()),
+                    extensionVersion: this.env.extensionVersion
+                })
+            );
+        }, 500);
+        this.timeouts.set(cacheKey, { dispose: () => once(clearTimeout)(timer) });
     }
     protected async isValidCachedKernel(kernel: LocalKernelConnectionMetadata): Promise<boolean> {
         switch (kernel.kind) {
@@ -190,126 +312,6 @@ export abstract class LocalKernelSpecFinderBase<
                     return r && kernel.interpreter ? this.fs.exists(kernel.interpreter.uri) : Promise.resolve(true);
                 });
         }
-    }
-    /**
-     * Load the IJupyterKernelSpec for a given spec path, check the ones that we have already loaded first
-     */
-    protected async getKernelSpec(
-        specPath: Uri,
-        cancelToken: CancellationToken,
-        interpreter?: PythonEnvironment,
-        globalSpecRootPath?: Uri
-    ): Promise<IJupyterKernelSpec | undefined> {
-        // This is a backup folder for old kernels created by us.
-        if (specPath.fsPath.includes(oldKernelsSpecFolderName)) {
-            return;
-        }
-        const key = getComparisonKey(specPath);
-        // If we have not already loaded this kernel spec, then load it
-        if (!this.pathToKernelSpec.has(key)) {
-            this.pathToKernelSpec.set(key, this.loadKernelSpec(specPath, cancelToken, interpreter));
-        }
-        // ! as the has and set above verify that we have a return here
-        return this.pathToKernelSpec.get(key)!.then((kernelSpec) => {
-            // Delete old kernelSpecs that we created in the global kernelSpecs folder.
-            const shouldDeleteKernelSpec =
-                kernelSpec &&
-                globalSpecRootPath &&
-                getKernelRegistrationInfo(kernelSpec) &&
-                kernelSpec.specFile &&
-                uriPath.isEqualOrParent(Uri.file(kernelSpec.specFile), globalSpecRootPath);
-            if (kernelSpec && !shouldDeleteKernelSpec) {
-                return kernelSpec;
-            }
-            if (kernelSpec?.specFile && shouldDeleteKernelSpec) {
-                // If this kernelSpec was registered by us and is in the global kernels folder,
-                // then remove it.
-                this.deleteOldKernelSpec(kernelSpec.specFile).catch(noop);
-            }
-
-            // If we failed to get a kernelSpec full path from our cache and loaded list
-            this.pathToKernelSpec.delete(key);
-            this.cache = this.cache?.filter((itemPath) => uriPath.isEqual(itemPath.kernelSpecFile, specPath));
-            return undefined;
-        });
-    }
-
-    private async deleteOldKernelSpec(kernelSpecFile: string) {
-        // Just copy this folder into a seprate location.
-        const kernelSpecFolderName = path.basename(path.dirname(kernelSpecFile));
-        const destinationFolder = path.join(path.dirname(path.dirname(kernelSpecFile)), oldKernelsSpecFolderName);
-        this.oldKernelSpecsFolder = destinationFolder;
-        const destinationFile = path.join(destinationFolder, kernelSpecFolderName, path.basename(kernelSpecFile));
-        await this.fs.createDirectory(Uri.file(path.dirname(destinationFile)));
-        await this.fs.copy(Uri.file(kernelSpecFile), Uri.file(destinationFile)).catch(noop);
-        await this.fs.delete(Uri.file(kernelSpecFile));
-        traceInfo(`Old KernelSpec '${kernelSpecFile}' deleted and backup stored in ${destinationFolder}`);
-    }
-    /**
-     * Load kernelspec json from disk
-     */
-    private async loadKernelSpec(
-        specPath: Uri,
-        cancelToken: CancellationToken,
-        interpreter?: PythonEnvironment
-    ): Promise<IJupyterKernelSpec | undefined> {
-        return loadKernelSpec(specPath, this.fs, cancelToken, interpreter);
-    }
-    // Given a set of paths, search for kernel.json files and return back the full paths of all of them that we find
-    protected async findKernelSpecsInPaths(
-        paths: (Uri | { interpreter: PythonEnvironment; kernelSearchPath: Uri })[],
-        cancelToken: CancellationToken
-    ): Promise<KernelSpecFileWithContainingInterpreter[]> {
-        const items = await Promise.all(paths.map((searchItem) => this.findKernelSpecsInPath(searchItem, cancelToken)));
-        return flatten(items);
-    }
-    // Given a set of paths, search for kernel.json files and return back the full paths of all of them that we find
-    private async findKernelSpecsInPath(
-        searchItem: Uri | { interpreter: PythonEnvironment; kernelSearchPath: Uri },
-        cancelToken: CancellationToken
-    ): Promise<KernelSpecFileWithContainingInterpreter[]> {
-        const cacheKey = isUri(searchItem)
-            ? getComparisonKey(searchItem)
-            : `${getComparisonKey(searchItem.interpreter.uri)}${getComparisonKey(searchItem.kernelSearchPath)}`;
-
-        const previousPromise = this.findKernelSpecsInPathCache.get(cacheKey);
-        if (previousPromise) {
-            return previousPromise;
-        }
-        const searchPath = isUri(searchItem) ? searchItem : searchItem.kernelSearchPath;
-        const promise = (async () => {
-            if (await this.fs.exists(searchPath)) {
-                if (cancelToken.isCancellationRequested) {
-                    return [];
-                }
-                const files = await this.fs.searchLocal(`**/kernel.json`, searchPath.fsPath, true);
-                return files
-                    .map((item) => uriPath.joinPath(searchPath, item))
-                    .map((item) => {
-                        return {
-                            interpreter: isUri(searchItem) ? undefined : searchItem.interpreter,
-                            kernelSpecFile: item
-                        };
-                    });
-            } else {
-                traceVerbose(`Not Searching for kernels as path does not exist, ${getDisplayPath(searchPath)}`);
-                return [];
-            }
-        })();
-        this.findKernelSpecsInPathCache.set(cacheKey, promise);
-        const disposable = cancelToken.onCancellationRequested(() => {
-            if (this.findKernelSpecsInPathCache.get(cacheKey) === promise) {
-                this.findKernelSpecsInPathCache.delete(cacheKey);
-            }
-        });
-        promise.finally(() => disposable.dispose());
-        promise.catch((ex) => {
-            if (this.findKernelSpecsInPathCache.get(cacheKey) === promise) {
-                this.findKernelSpecsInPathCache.delete(cacheKey);
-            }
-            traceVerbose(`Failed to search for kernels in ${getDisplayPath(searchPath)} with an error`, ex);
-        });
-        return promise;
     }
 }
 
@@ -328,16 +330,25 @@ export async function loadKernelSpec(
     }
     let kernelJson: ReadWrite<IJupyterKernelSpec>;
     try {
-        traceVerbose(
-            `Loading kernelspec from ${getDisplayPath(specPath)} for ${
-                interpreter?.uri ? getDisplayPath(interpreter.uri) : ''
-            }`
-        );
+        // logger.debug(
+        //     `Loading kernelspec from ${getDisplayPath(specPath)} ${
+        //         interpreter?.uri ? `for ${getDisplayPath(interpreter.uri)}` : ''
+        //     }`
+        // );
         kernelJson = JSON.parse(await fs.readFile(specPath));
     } catch (ex) {
-        traceError(`Failed to parse kernelspec ${specPath}`, ex);
+        logger.error(`Failed to parse kernelspec ${specPath}`, ex);
         return;
     }
+
+    // Replace the `resource_dir` in the kernelspec argv with the actual path
+    // Check code in format_kernel_cmd of jupyter_client/manager.py
+    // The values `{connection_file}`, `{prefix}` and `resource_dir` are replaced with the actual values.
+    const resourceDir = path.dirname(specPath.fsPath);
+    kernelJson.argv = kernelJson.argv.map((arg) => {
+        return arg.replaceAll('{resource_dir}', resourceDir);
+    });
+
     if (cancelToken.isCancellationRequested) {
         return;
     }
@@ -365,18 +376,22 @@ export async function loadKernelSpec(
             kernelJson.name = `${kernelJson.name}.${argv.join('#')}`;
         }
     }
-    kernelJson.metadata = kernelJson.metadata || {};
-    kernelJson.metadata.vscode = kernelJson.metadata.vscode || {};
-    if (!kernelJson.metadata.vscode.originalSpecFile) {
-        kernelJson.metadata.vscode.originalSpecFile = specPath.fsPath;
+    const metadata = (kernelJson.metadata as ReadWrite<typeof kernelJson.metadata>) || {};
+    metadata.vscode = metadata.vscode || {};
+    if (!metadata.vscode.originalSpecFile) {
+        metadata.vscode.originalSpecFile = specPath.fsPath;
     }
-    if (!kernelJson.metadata.vscode.originalDisplayName) {
-        kernelJson.metadata.vscode.originalDisplayName = kernelJson.display_name;
+    if (!metadata.vscode.originalDisplayName) {
+        metadata.vscode.originalDisplayName = kernelJson.display_name;
     }
-    if (kernelJson.metadata.originalSpecFile) {
-        kernelJson.metadata.vscode.originalSpecFile = kernelJson.metadata.originalSpecFile;
-        delete kernelJson.metadata.originalSpecFile;
+    if (metadata.originalSpecFile) {
+        metadata.vscode.originalSpecFile = metadata.originalSpecFile;
+        delete metadata.originalSpecFile;
     }
+    kernelJson.metadata = metadata;
+
+    // Some registered kernel specs do not have a name, in this case use the last part of the path
+    kernelJson.name = kernelJson?.name || path.basename(path.dirname(specPath.fsPath));
 
     const kernelSpec: IJupyterKernelSpec = new JupyterKernelSpec(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -387,14 +402,13 @@ export async function loadKernelSpec(
         getKernelRegistrationInfo(kernelJson)
     );
 
-    // Some registered kernel specs do not have a name, in this case use the last part of the path
-    kernelSpec.name = kernelJson?.name || path.basename(path.dirname(specPath.fsPath));
-
-    // Possible user deleted the underlying kernel.
+    // Possible user deleted the underlying interpreter.
     const interpreterPath = interpreter?.uri.fsPath || kernelJson?.metadata?.interpreter?.path;
-    if (interpreterPath && !(await fs.exists(Uri.file(interpreterPath)))) {
+    const isEmptyCondaEnv = isCondaEnvironmentWithoutPython(interpreter);
+    if (interpreterPath && !isEmptyCondaEnv && !(await fs.exists(Uri.file(interpreterPath)))) {
         return;
     }
 
+    kernelJson.isRegisteredByVSC = getKernelRegistrationInfo(kernelJson);
     return kernelSpec;
 }

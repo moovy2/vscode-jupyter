@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { CancellationError, CancellationToken, CancellationTokenSource } from 'vscode';
-import { createDeferred } from './utils/async';
+import { IDisposable } from './types';
+import { isPromiseLike } from './utils/async';
 import { Common } from './utils/localize';
+import { dispose } from './utils/lifecycle';
 
 export function isCancellationError(ex: Error, includeErrorsWithTheMessageCanceled = false) {
     if (typeof ex !== 'object' || !ex) {
@@ -16,134 +16,106 @@ export function isCancellationError(ex: Error, includeErrorsWithTheMessageCancel
     }
     if (
         includeErrorsWithTheMessageCanceled &&
-        (ex.message.includes('Canceled') || ex.message.includes(Common.canceled()))
+        (ex.message.includes('Canceled') || ex.message.includes(Common.canceled))
     ) {
         return true;
     }
     return false;
 }
 
-/**
- * Create a promise that will either resolve with a default value or reject when the token is cancelled.
- *
- * @export
- * @template T
- * @param {({ defaultValue: T; token: CancellationToken; cancelAction: 'reject' | 'resolve' })} options
- * @returns {Promise<T>}
- */
-export function createPromiseFromCancellation<T>(
-    options:
-        | {
-              defaultValue: T;
-              token?: CancellationToken;
-              cancelAction: 'resolve';
-          }
-        | {
-              token?: CancellationToken;
-              cancelAction: 'reject';
-          }
-): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-        // Never resolve.
-        if (!options.token) {
-            return;
-        }
-        const complete = () => {
-            if (options.token!.isCancellationRequested) {
-                if (options.cancelAction === 'resolve') {
-                    return resolve(options.defaultValue);
-                }
-                if (options.cancelAction === 'reject') {
-                    return reject(new CancellationError());
-                }
-            }
-        };
+export async function raceCancellation<T>(
+    token: CancellationToken | undefined,
+    ...promises: Promise<T>[]
+): Promise<T | undefined>;
+export async function raceCancellation<T>(
+    token: CancellationToken | undefined,
+    defaultValue: T,
+    ...promises: Promise<T>[]
+): Promise<T>;
+export async function raceCancellation<T>(
+    token: CancellationToken | undefined,
+    defaultValue: T,
+    ...promises: Promise<T>[]
+): Promise<T | undefined> {
+    let value: T | undefined;
+    if (isPromiseLike(defaultValue)) {
+        promises.push(defaultValue as unknown as Promise<T>);
+        value = undefined;
+    } else {
+        value = defaultValue;
+    }
+    if (!token) {
+        return await Promise.race(promises);
+    }
+    if (token.isCancellationRequested) {
+        return value;
+    }
 
-        options.token.onCancellationRequested(complete);
+    return new Promise((resolve, reject) => {
+        if (token.isCancellationRequested) {
+            return resolve(value);
+        }
+        const disposable = token.onCancellationRequested(() => {
+            disposable.dispose();
+            resolve(value);
+        });
+        Promise.race(promises)
+            .then(resolve, reject)
+            .finally(() => disposable.dispose());
+    });
+}
+export async function raceCancellationError<T>(token?: CancellationToken, ...promises: Promise<T>[]): Promise<T> {
+    if (!token) {
+        return Promise.race(promises);
+    }
+    if (token.isCancellationRequested) {
+        throw new CancellationError();
+    }
+
+    return new Promise((resolve, reject) => {
+        if (token.isCancellationRequested) {
+            return reject(new CancellationError());
+        }
+        const disposable = token.onCancellationRequested(() => {
+            disposable.dispose();
+            reject(new CancellationError());
+        });
+        Promise.race(promises)
+            .then(resolve, reject)
+            .finally(() => disposable.dispose());
     });
 }
 
 /**
  * Create a single unified cancellation token that wraps multiple cancellation tokens.
- *
- * @export
- * @param {(...(CancellationToken | undefined)[])} tokens
- * @returns {CancellationToken}
  */
-export function wrapCancellationTokens(...tokens: (CancellationToken | undefined)[]): CancellationToken {
+export function wrapCancellationTokens(...tokens: CancellationToken[]) {
     const wrappedCancellationToken = new CancellationTokenSource();
+    const disposables: IDisposable[] = [];
     for (const token of tokens) {
         if (!token) {
             continue;
         }
         if (token.isCancellationRequested) {
-            return token;
+            wrappedCancellationToken.cancel();
         }
-        token.onCancellationRequested(() => wrappedCancellationToken.cancel());
+        token.onCancellationRequested(() => wrappedCancellationToken.cancel(), undefined, disposables);
     }
-
-    return wrappedCancellationToken.token;
+    const oldDispose = wrappedCancellationToken.dispose.bind(wrappedCancellationToken);
+    wrappedCancellationToken.dispose = () => {
+        oldDispose();
+        dispose(disposables);
+    };
+    return wrappedCancellationToken;
 }
 
 export namespace Cancellation {
-    /**
-     * Races a promise and cancellation. Promise can take a cancellation token too in order to listen to cancellation.
-     * @param work function returning a promise to race
-     * @param token token used for cancellation
-     */
-    export function race<T>(work: (token?: CancellationToken) => Promise<T>, token?: CancellationToken): Promise<T> {
-        if (token) {
-            // Use a deferred promise. Resolves when the work finishes
-            const deferred = createDeferred<T>();
-
-            // Cancel the deferred promise when the cancellation happens
-            token.onCancellationRequested(() => {
-                if (!deferred.completed) {
-                    deferred.reject(new CancellationError());
-                }
-            });
-
-            // Might already be canceled
-            if (token.isCancellationRequested) {
-                // Just start out as rejected
-                deferred.reject(new CancellationError());
-            } else {
-                // Not canceled yet. When the work finishes
-                // either resolve our promise or cancel.
-                work(token)
-                    .then((v) => {
-                        if (!deferred.completed) {
-                            deferred.resolve(v);
-                        }
-                    })
-                    .catch((e) => {
-                        if (!deferred.completed) {
-                            deferred.reject(e);
-                        }
-                    });
-            }
-
-            return deferred.promise;
-        } else {
-            // No actual token, just do the original work.
-            return work();
-        }
-    }
-
-    /**
-     * isCanceled returns a boolean indicating if the cancel token has been canceled.
-     * @param cancelToken
-     */
-    export function isCanceled(cancelToken?: CancellationToken): boolean {
-        return cancelToken ? cancelToken.isCancellationRequested : false;
-    }
-
     /**
      * throws a CancellationError if the token is canceled.
      * @param cancelToken
      */
     export function throwIfCanceled(cancelToken?: CancellationToken): void {
-        if (isCanceled(cancelToken)) {
+        if (cancelToken?.isCancellationRequested) {
             throw new CancellationError();
         }
     }

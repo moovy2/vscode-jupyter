@@ -1,18 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { CancellationToken, Event } from 'vscode';
-import { IAsyncDisposable, IDisplayOptions, IDisposable, Resource } from '../../platform/common/types';
-import { IContributedKernelFinder } from '../internalTypes';
+import { Resource } from '../../platform/common/types';
 import {
-    IKernelConnectionSession,
-    KernelConnectionMetadata,
-    LocalKernelConnectionMetadata,
+    IRawKernelSession,
+    LocaLKernelSessionCreationOptions,
     LocalKernelSpecConnectionMetadata,
     PythonKernelConnectionMetadata
 } from '../types';
+import type { ObservableDisposable } from '../../platform/common/utils/lifecycle';
 
 export const IKernelLauncher = Symbol('IKernelLauncher');
 export interface IKernelLauncher {
@@ -38,14 +35,14 @@ export interface IKernelConnection {
     kernel_name?: string;
 }
 
-export interface IKernelProcess extends IAsyncDisposable {
+export interface IKernelProcess extends ObservableDisposable {
     readonly pid?: number;
     readonly connection: Readonly<IKernelConnection>;
     readonly kernelConnectionMetadata: Readonly<LocalKernelSpecConnectionMetadata | PythonKernelConnectionMetadata>;
     /**
      * This event is triggered if the process is exited
      */
-    readonly exited: Event<{ exitCode?: number; reason?: string }>;
+    readonly exited: Event<{ exitCode?: number; reason?: string; stderr: string }>;
     /**
      * Whether we can interrupt this kernel process.
      * If not possible, send a shell message to the underlying kernel.
@@ -58,30 +55,13 @@ export interface IKernelProcess extends IAsyncDisposable {
     interrupt(): Promise<void>;
 }
 
-export interface ILocalKernelFinder extends IContributedKernelFinder<LocalKernelConnectionMetadata> {}
-
-/**
- * The daemon responsible for the Python Kernel.
- */
-export interface IPythonKernelDaemon extends IDisposable {
-    interrupt(): Promise<void>;
-    kill(): Promise<void>;
-}
-
 // Provides a service to determine if raw notebook is supported or not
 export const IRawNotebookSupportedService = Symbol('IRawNotebookSupportedService');
 export interface IRawNotebookSupportedService {
     isSupported: boolean;
 }
 
-// Provides notebooks that talk directly to kernels as opposed to a jupyter server
-export const IRawNotebookProvider = Symbol('IRawNotebookProvider');
-export interface IRawNotebookProvider extends IAsyncDisposable {
-    isSupported: boolean;
-    createNotebook(
-        resource: Resource,
-        kernelConnection: KernelConnectionMetadata,
-        ui: IDisplayOptions,
-        cancelToken: CancellationToken
-    ): Promise<IKernelConnectionSession>;
+export const IRawKernelSessionFactory = Symbol('IRawKernelSessionFactory');
+export interface IRawKernelSessionFactory {
+    create(options: LocaLKernelSessionCreationOptions): Promise<IRawKernelSession>;
 }

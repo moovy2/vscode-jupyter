@@ -11,6 +11,7 @@ import { getComparisonKey } from '../../platform/vscode-path/resources';
 import { getFilePath } from '../../platform/common/platform/fs-paths';
 import { trackedInfo, pythonEnvironmentsByHash, updatePythonPackages } from '../../platform/telemetry/telemetry';
 import { KernelActionSource, KernelConnectionMetadata } from '../types';
+import { getEnvironmentType, getVersion } from '../../platform/interpreter/helpers';
 
 /**
  * This information is sent with each telemetry event.
@@ -58,7 +59,18 @@ export async function trackKernelResourceInformation(
         {
             resourceType: getResourceType(resource),
             resourceHash: resource ? await getTelemetrySafeHashedString(resource.toString()) : undefined,
-            kernelSessionId: await getTelemetrySafeHashedString(Date.now().toString())
+            kernelSessionId: await getTelemetrySafeHashedString(Date.now().toString()),
+            capturedEnvVars: undefined,
+            userExecutedCell: undefined,
+            disableUI: undefined,
+            kernelLanguage: undefined,
+            kernelId: undefined,
+            kernelSpecHash: undefined,
+            isUsingActiveInterpreter: undefined,
+            pythonEnvironmentType: undefined,
+            pythonEnvironmentPath: undefined,
+            pythonEnvironmentVersion: undefined,
+            kernelConnectionType: undefined
         },
         { previouslySelectedKernelConnectionId: '' }
     ];
@@ -101,9 +113,14 @@ export async function trackKernelResourceInformation(
             default:
                 break;
         }
-        [currentData.kernelLanguage, currentData.kernelId] = await Promise.all([
-            language,
-            getTelemetrySafeHashedString(kernelConnection.id)
+        const kernelSpecHash =
+            'kernelSpec' in kernelConnection && kernelConnection.kernelSpec.specFile
+                ? getTelemetrySafeHashedString(kernelConnection.kernelSpec.specFile)
+                : Promise.resolve('');
+        currentData.kernelLanguage = language;
+        [currentData.kernelId, currentData.kernelSpecHash] = await Promise.all([
+            getTelemetrySafeHashedString(kernelConnection.id),
+            kernelSpecHash
         ]);
 
         // Keep track of the kernel that was last selected.
@@ -115,14 +132,15 @@ export async function trackKernelResourceInformation(
                 resource,
                 interpreter
             );
-            currentData.pythonEnvironmentType = interpreter.envType;
-            currentData.pythonEnvironmentPath = await getTelemetrySafeHashedString(
-                getFilePath(getNormalizedInterpreterPath(interpreter.uri))
-            );
+            currentData.pythonEnvironmentType = getEnvironmentType(interpreter);
+            const [pythonEnvironmentPath, version] = await Promise.all([
+                getTelemetrySafeHashedString(getFilePath(getNormalizedInterpreterPath(interpreter.uri))),
+                getVersion(interpreter)
+            ]);
+            currentData.pythonEnvironmentPath = pythonEnvironmentPath;
             pythonEnvironmentsByHash.set(currentData.pythonEnvironmentPath, interpreter);
-            if (interpreter.version) {
-                const { major, minor, patch } = interpreter.version;
-                currentData.pythonEnvironmentVersion = `${major}.${minor}.${patch}`;
+            if (version) {
+                currentData.pythonEnvironmentVersion = `${version.major}.${version.minor}.${version.micro}`;
             } else {
                 currentData.pythonEnvironmentVersion = undefined;
             }

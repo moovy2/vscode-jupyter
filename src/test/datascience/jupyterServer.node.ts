@@ -6,23 +6,21 @@
 
 /** DO NOT USE VSCODE in this file. It's loaded outside of an extension */
 
-import getFreePort from 'get-port';
+import * as crypto from 'crypto';
 import * as tcpPortUsed from 'tcp-port-used';
+import getPort from 'get-port';
 import uuid from 'uuid/v4';
 import * as path from 'path';
 import * as fs from 'fs-extra';
 import * as child_process from 'child_process';
+import { Event, EventEmitter } from '@c4312/evt';
 const uuidToHex = require('uuid-to-hex') as typeof import('uuid-to-hex');
 import { EXTENSION_ROOT_DIR_FOR_TESTS } from '../constants.node';
-import { disposeAllDisposables } from '../../platform/common/helpers';
-import { Observable } from 'rxjs-compat/Observable';
+import { splitLines } from '../../platform/common/helpers';
 const testFolder = path.join(EXTENSION_ROOT_DIR_FOR_TESTS, 'src', 'test', 'datascience');
-const isCI = process.env.TF_BUILD !== undefined || process.env.GITHUB_ACTIONS === 'true';
-
-import * as iconv from 'iconv-lite';
 import { sleep } from '../core';
-import { EXTENSION_ROOT_DIR } from '../../platform/constants.node';
 import { noop } from '../../platform/common/utils/misc';
+import { dispose } from '../../platform/common/utils/lifecycle';
 
 function getPythonPath(): string {
     if (process.env.CI_PYTHON_PATH && fs.existsSync(process.env.CI_PYTHON_PATH)) {
@@ -35,9 +33,8 @@ function getPythonPath(): string {
 }
 
 class BufferDecoder {
-    public decode(buffers: Buffer[], encoding: string = 'utf-8'): string {
-        encoding = iconv.encodingExists(encoding) ? encoding : 'utf-8';
-        return iconv.decode(Buffer.concat(buffers), encoding);
+    public decode(buffers: Buffer[]): string {
+        return Buffer.concat(buffers).toString('utf-8');
     }
 }
 
@@ -54,22 +51,16 @@ type Output<T extends string | Buffer> = {
     out: T;
 };
 
-type ObservableExecutionResult<T extends string | Buffer> = {
+export interface ObservableOutput<T> {
+    onDidChange: Event<T>;
+    done: Promise<void>;
+}
+
+export type ObservableExecutionResult<T extends string | Buffer> = {
     proc: child_process.ChildProcess | undefined;
-    out: Observable<Output<T>>;
+    out: ObservableOutput<Output<T>>;
     dispose(): void;
 };
-
-// Tracing can't be used either
-function traceInfo(message: string) {
-    console.log(message);
-}
-
-function traceInfoIfCI(message: string) {
-    if (isCI) {
-        traceInfo(message);
-    }
-}
 
 export class JupyterServer {
     /**
@@ -82,6 +73,7 @@ export class JupyterServer {
         }
         return JupyterServer._instance;
     }
+    private static StartPort = 9_000;
     private static _instance: JupyterServer;
     private _disposables: IDisposable[] = [];
     private _jupyterServerWithToken?: Promise<string>;
@@ -89,14 +81,15 @@ export class JupyterServer {
     private _jupyterServerWithCert?: Promise<string>;
     private availablePort?: number;
     private availableSecondPort?: number;
-    private availableThirdPort?: number;
     private decoder = new BufferDecoder();
+    private get nextPort(): number {
+        return JupyterServer.StartPort++;
+    }
     public async dispose() {
         this._jupyterServerWithToken = undefined;
         this._secondJupyterServerWithToken = undefined;
         console.log(`Disposing jupyter server instance`);
-        disposeAllDisposables(this._disposables);
-        traceInfo('Shutting Jupyter server used for remote tests');
+        dispose(this._disposables);
         if (this.availablePort) {
             await tcpPortUsed.waitUntilFree(this.availablePort, 200, 5_000).catch(noop);
         }
@@ -109,27 +102,42 @@ export class JupyterServer {
         if (!this._jupyterServerWithCert) {
             this._jupyterServerWithCert = new Promise<string>(async (resolve, reject) => {
                 const token = this.generateToken();
-                const port = await this.getThirdFreePort();
+                const port = await getPort({ host: 'localhost', port: this.nextPort });
                 // Possible previous instance of jupyter has not completely shutdown.
                 // Wait for it to shutdown fully so that we can re-use the same port.
                 await tcpPortUsed.waitUntilFree(port, 200, 10_000);
                 try {
-                    await this.startJupyterServer({
+                    const { url } = await this.startJupyterServer({
                         port,
                         token,
                         useCert: true,
                         detached
                     });
                     await sleep(5_000); // Wait for some time for Jupyter to warm up & be ready to accept connections.
-
                     // Anything with a cert is https, not http
-                    resolve(`https://localhost:${port}/?token=${token}`);
+                    resolve(url);
                 } catch (ex) {
                     reject(ex);
                 }
             });
         }
         return this._jupyterServerWithCert;
+    }
+    public async startJupyter(options: {
+        token?: string;
+        port?: number;
+        useCert?: boolean;
+        jupyterLab?: boolean;
+        password?: string;
+    }): Promise<{ url: string; dispose: () => void }> {
+        const port = await getPort({ host: 'localhost', port: this.nextPort });
+        // Possible previous instance of jupyter has not completely shutdown.
+        // Wait for it to shutdown fully so that we can re-use the same port.
+        await tcpPortUsed.waitUntilFree(port, 200, 10_000);
+        const token = typeof options.token === 'string' ? options.token : this.generateToken();
+        const result = await this.startJupyterServer({ ...options, port, token });
+        await sleep(5_000); // Wait for some time for Jupyter to warm up & be ready to accept connections.
+        return result;
     }
 
     public async startJupyterWithToken({ detached }: { detached?: boolean } = {}): Promise<string> {
@@ -141,14 +149,12 @@ export class JupyterServer {
                 // Wait for it to shutdown fully so that we can re-use the same port.
                 await tcpPortUsed.waitUntilFree(port, 200, 10_000);
                 try {
-                    await this.startJupyterServer({
+                    const { url } = await this.startJupyterServer({
                         port,
                         token,
                         detached
                     });
                     await sleep(5_000); // Wait for some time for Jupyter to warm up & be ready to accept connections.
-                    const url = `http://localhost:${port}/?token=${token}`;
-                    console.log(`Started Jupyter Server on ${url}`);
                     resolve(url);
                 } catch (ex) {
                     reject(ex);
@@ -165,13 +171,11 @@ export class JupyterServer {
                 // Wait for it to shutdown fully so that we can re-use the same port.
                 await tcpPortUsed.waitUntilFree(port, 200, 10_000);
                 try {
-                    await this.startJupyterServer({
+                    const { url } = await this.startJupyterServer({
                         port,
                         token
                     });
                     await sleep(5_000); // Wait for some time for Jupyter to warm up & be ready to accept connections.
-                    const url = `http://localhost:${port}/?token=${token}`;
-                    console.log(`Started Jupyter Server on ${url}`);
                     resolve(url);
                 } catch (ex) {
                     reject(ex);
@@ -188,7 +192,7 @@ export class JupyterServer {
         // Always use the same port (when using different ports, our code doesn't work as we need to re-load VSC).
         // The remote uri is cached in a few places (known issue).
         if (!this.availablePort) {
-            this.availablePort = await getFreePort({ host: 'localhost' }).then((p) => p);
+            this.availablePort = await getPort({ host: 'localhost', port: this.nextPort });
         }
         return this.availablePort!;
     }
@@ -196,45 +200,52 @@ export class JupyterServer {
         // Always use the same port (when using different ports, our code doesn't work as we need to re-load VSC).
         // The remote uri is cached in a few places (known issue).
         if (!this.availableSecondPort) {
-            this.availableSecondPort = await getFreePort({ host: 'localhost' }).then((p) => p);
+            this.availableSecondPort = await getPort({ host: 'localhost', port: this.nextPort });
         }
         return this.availableSecondPort!;
-    }
-
-    private async getThirdFreePort() {
-        // Always use the same port (when using different ports, our code doesn't work as we need to re-load VSC).
-        // The remote uri is cached in a few places (known issue).
-        if (!this.availableThirdPort) {
-            this.availableThirdPort = await getFreePort({ host: 'localhost' }).then((p) => p);
-        }
-        return this.availableThirdPort!;
     }
 
     private startJupyterServer({
         token,
         port,
         useCert,
+        jupyterLab,
+        password,
         detached
     }: {
         token: string;
         port: number;
         useCert?: boolean;
+        jupyterLab?: boolean;
+        password?: string;
         detached?: boolean;
-    }): Promise<void> {
-        return new Promise<void>(async (resolve, reject) => {
+    }): Promise<{ url: string; dispose: () => void }> {
+        return new Promise<{ url: string; dispose: () => void }>(async (resolve, reject) => {
             try {
                 const args = [
                     '-m',
                     'jupyter',
-                    'notebook',
+                    jupyterLab ? 'lab' : 'notebook',
                     '--no-browser',
                     `--NotebookApp.port=${port}`,
                     `--NotebookApp.token=${token}`,
-                    `--NotebookApp.allow_origin=*`
+                    `--ServerAppApp.port=${port}`,
+                    `--ServerAppApp.token=${token}`,
+                    `--NotebookApp.allow_origin='*'`,
+                    `--allow-root`
                 ];
+                if (typeof password === 'string') {
+                    if (password.length === 0) {
+                        args.push(`--NotebookApp.password=`);
+                        args.push(`--ServerApp.password=`);
+                    } else {
+                        args.push(`--NotebookApp.password=${generateHashedPassword(password)}`);
+                        args.push(`--ServerApp.password=${generateHashedPassword(password)}`);
+                    }
+                }
                 if (useCert) {
                     const pemFile = path.join(
-                        EXTENSION_ROOT_DIR,
+                        EXTENSION_ROOT_DIR_FOR_TESTS,
                         'src',
                         'test',
                         'datascience',
@@ -242,7 +253,7 @@ export class JupyterServer {
                         'jcert.pem'
                     );
                     const keyFile = path.join(
-                        EXTENSION_ROOT_DIR,
+                        EXTENSION_ROOT_DIR_FOR_TESTS,
                         'src',
                         'test',
                         'datascience',
@@ -252,7 +263,7 @@ export class JupyterServer {
                     args.push(`--certfile=${pemFile}`);
                     args.push(`--keyfile=${keyFile}`);
                 }
-                traceInfoIfCI(`Starting Jupyter on CI with args ${args.join(' ')}`);
+                console.log(`Starting Jupyter in ${getPythonPath()} with ${args.join(' ')}`);
                 const result = this.execObservable(getPythonPath(), args, {
                     cwd: testFolder,
                     detached
@@ -260,12 +271,14 @@ export class JupyterServer {
                 if (!result.proc) {
                     throw new Error('Starting Jupyter failed, no process');
                 }
-                this.pid = result.proc.pid;
-                result.proc.once('close', () => traceInfo('Shutting Jupyter server used for remote tests (closed)'));
-                result.proc.once('disconnect', () =>
-                    traceInfo('Shutting Jupyter server used for remote tests (disconnected)')
-                );
-                result.proc.once('exit', () => traceInfo('Shutting Jupyter server used for remote tests (exited)'));
+                if (result.proc.pid) {
+                    this.pid = result.proc.pid;
+                }
+                // result.proc.once('close', () => logger.debug('Shutting Jupyter server used for remote tests (closed)'));
+                // result.proc.once('disconnect', () =>
+                //     logger.debug('Shutting Jupyter server used for remote tests (disconnected)')
+                // );
+                // result.proc.once('exit', () => logger.debug('Shutting Jupyter server used for remote tests (exited)'));
                 const procDisposable = {
                     dispose: () => {
                         if (!result.proc) {
@@ -278,19 +291,43 @@ export class JupyterServer {
                         }
                     }
                 };
-                const subscription = result.out.subscribe((output) => {
+                let allOutput = '';
+                const subscription = result.out.onDidChange((output) => {
+                    allOutput += output.out;
+                    console.log(`Jupyter Output > ${output.out}`);
                     // When debugging Web Tests using VSCode dfebugger, we'd like to see this info.
                     // This way we can click the link in the output panel easily.
-                    console.info(output.out);
-                    traceInfoIfCI(`Test Remote Jupyter Server Output: ${output.out}`);
-                    if (output.out.indexOf('Use Control-C to stop this server and shut down all kernels')) {
-                        resolve();
+                    if (output.out.indexOf('Use Control-C to stop this server and shut down all kernels') >= 0) {
+                        const lines = splitLines(allOutput, { trim: true, removeEmptyEntries: true });
+                        const indexOfCtrlC = lines.findIndex((item) =>
+                            item.includes('Use Control-C to stop this server')
+                        );
+                        const lineWithUrl = lines
+                            .slice(0, indexOfCtrlC)
+                            .reverse()
+                            .find(
+                                (line) =>
+                                    line.includes(`http://localhost:${port}`) ||
+                                    line.includes(`https://localhost:${port}`)
+                            );
+                        let url = '';
+                        if (lineWithUrl) {
+                            url = lineWithUrl.substring(lineWithUrl.indexOf('http'));
+                        } else {
+                            url = `http${useCert ? 's' : ''}://localhost:${port}/?token=${token}`;
+                        }
+                        // token might not be printed in the output
+                        if (url.includes(`token=...`)) {
+                            url = url.replace(`token=...`, `token=${token}`);
+                        }
+                        console.log(`Started Jupyter Server on ${url}`);
+                        resolve({ url, dispose: () => procDisposable.dispose() });
                     }
                 });
                 this._disposables.push(procDisposable);
-                this._disposables.push({ dispose: () => subscription.unsubscribe() });
+                this._disposables.push(subscription);
             } catch (ex) {
-                traceInfo(`Starting remote jupyter server failed ${ex}`);
+                console.error(`Starting remote jupyter server failed`, ex);
                 reject(ex);
             }
         });
@@ -301,10 +338,9 @@ export class JupyterServer {
         args: string[],
         options: child_process.SpawnOptions = {}
     ): ObservableExecutionResult<string> {
-        const encoding = 'utf8';
         const proc = child_process.spawn(file, args, options);
         let procExited = false;
-        traceInfoIfCI(`Exec observable ${file}, ${args.join(' ')}`);
+        const disposables: IDisposable[] = [];
         const disposable: IDisposable = {
             // eslint-disable-next-line
             dispose: function () {
@@ -314,40 +350,39 @@ export class JupyterServer {
                 if (proc) {
                     proc.unref();
                 }
+                disposables.forEach((d) => d.dispose());
             }
         };
 
-        const output = new Observable<Output<string>>((subscriber) => {
-            const disposables: IDisposable[] = [];
+        const output = createObservable<Output<string>>();
+        disposables.push(output);
+        const on = (ee: NodeJS.EventEmitter, name: string, fn: Function) => {
+            ee.on(name, fn as any);
+            disposables.push({ dispose: () => ee.removeListener(name, fn as any) as any });
+        };
 
-            const on = (ee: NodeJS.EventEmitter, name: string, fn: Function) => {
-                ee.on(name, fn as any);
-                disposables.push({ dispose: () => ee.removeListener(name, fn as any) as any });
-            };
+        const sendOutput = (source: 'stdout' | 'stderr', data: Buffer) => {
+            const out = this.decoder.decode([data]);
+            output.fire({ source, out: out });
+        };
 
-            const sendOutput = (source: 'stdout' | 'stderr', data: Buffer) => {
-                const out = this.decoder.decode([data], encoding);
-                subscriber.next({ source, out: out });
-            };
+        on(proc.stdout!, 'data', (data: Buffer) => sendOutput('stdout', data));
+        on(proc.stderr!, 'data', (data: Buffer) => sendOutput('stderr', data));
 
-            on(proc.stdout!, 'data', (data: Buffer) => sendOutput('stdout', data));
-            on(proc.stderr!, 'data', (data: Buffer) => sendOutput('stderr', data));
-
-            proc.once('close', () => {
-                procExited = true;
-                subscriber.complete();
-                disposables.forEach((d) => d.dispose());
-            });
-            proc.once('exit', () => {
-                procExited = true;
-                subscriber.complete();
-                disposables.forEach((d) => d.dispose());
-            });
-            proc.once('error', (ex) => {
-                procExited = true;
-                subscriber.error(ex);
-                disposables.forEach((d) => d.dispose());
-            });
+        proc.once('close', () => {
+            procExited = true;
+            output.resolve();
+            disposables.forEach((d) => d.dispose());
+        });
+        proc.once('exit', () => {
+            procExited = true;
+            output.reject();
+            disposables.forEach((d) => d.dispose());
+        });
+        proc.once('error', (ex) => {
+            procExited = true;
+            output.reject(ex);
+            disposables.forEach((d) => d.dispose());
         });
 
         return {
@@ -357,8 +392,11 @@ export class JupyterServer {
         };
     }
 
-    public static kill(pid: number): void {
+    public static kill(pid?: number): void {
         try {
+            if (!pid) {
+                return;
+            }
             if (process.platform === 'win32') {
                 // Windows doesn't support SIGTERM, so execute taskkill to kill the process
                 child_process.execSync(`taskkill /pid ${pid} /T /F`);
@@ -369,4 +407,50 @@ export class JupyterServer {
             // Ignore.
         }
     }
+}
+
+function generateHashedPassword(password: string) {
+    const hash = crypto.createHash('sha1'); // CodeQL [SM04514] This is used only in tests and not in production. Also this is a requirement of the Jupyter Application (out of our control).
+    const salt = genRandomString(16);
+    hash.update(password); // CodeQL [SM01511] This password is hashed as per the requirements of Jupyter Server application, it is only used in tests (to launch a password protected jupyter server) and not production.
+    hash.update(salt);
+    return `sha1:${salt}:${hash.digest('hex').toString()}`;
+}
+
+/**
+ * generates random string of characters i.e salt
+ * @function
+ * @param {number} length - Length of the random string.
+ */
+function genRandomString(length = 16) {
+    return crypto
+        .randomBytes(Math.ceil(length / 2))
+        .toString('hex') /** convert to hexadecimal format */
+        .slice(0, length); /** return required number of characters */
+}
+
+function createObservable<T>() {
+    const onDidChange = new EventEmitter<T>();
+    let resolve: () => void = noop;
+    let reject: (reason?: any) => void = noop;
+    const promise = new Promise<void>((rs, rj) => {
+        resolve = rs;
+        reject = rj;
+    });
+    // No dangling promises.
+    promise.catch(noop);
+    return {
+        get onDidChange() {
+            return onDidChange.event;
+        },
+        get done() {
+            return promise;
+        },
+        resolve: resolve.bind(promise),
+        reject: reject.bind(promise),
+        fire: onDidChange.fire.bind(onDidChange),
+        dispose: () => {
+            onDidChange.dispose();
+        }
+    };
 }

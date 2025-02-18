@@ -1,14 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// 'use strict';
-
+//
 // /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires */
 // import { assert } from 'chai';
 // import * as sinon from 'sinon';
 // import { Common } from '../../../platform/common/utils/localize';
 // import { IVSCodeNotebook } from '../../../platform/common/application/types';
-// import { traceInfo } from '../../../platform/common/logger.node';
+// import { logger } from '../../../platform/common/logger.node';
 // import { IDisposable, Product } from '../../../platform/common/types';
 // import { IExtensionTestApi } from '../../common';
 // import { initialize } from '../../initialize';
@@ -28,11 +27,9 @@
 // import {
 //     IJupyterKernelConnectionSession,
 //     INotebook,
-//     INotebookProvider,
-//     KernelSocketInformation
+//     INotebookProvider
 // } from '../../../platform/datascience/types';
 // import { instance, mock, when } from 'ts-mockito';
-// import { Subject } from 'rxjs-compat/Subject';
 // import { EventEmitter, NotebookDocument } from 'vscode';
 // import { ServerStatus } from '../../../webviews/webview-side/interactive-common/mainState';
 // import { MockJupyterSession } from '../mockJupyterSession';
@@ -42,7 +39,7 @@
 // const expectedPromptMessageSuffix = `requires ${ProductNames.get(Product.ipykernel)!} to be installed.`;
 
 // /* eslint-disable @typescript-eslint/no-explicit-any, no-invalid-this */
-// suite('DataScience - VSCode Notebook - (Execution) (slow)', function () {
+// suite('VSCode Notebook -', function () {
 //     let api: IExtensionTestApi;
 //     const disposables: IDisposable[] = [];
 //     let vscodeNotebook: IVSCodeNotebook;
@@ -61,7 +58,7 @@
 //     let notebookProvider: INotebookProvider;
 //     suiteSetup(async function () {
 //         return this.skip();
-//         traceInfo('Suite Setup');
+//         logger.info('Suite Setup');
 //         this.timeout(120_000);
 //         api = await initialize();
 //         if (!(await canRunNotebookTests())) {
@@ -70,7 +67,7 @@
 // //         await hijackPrompt(
 //             'showErrorMessage',
 //             { endsWith: expectedPromptMessageSuffix },
-//             { text: Common.install(), clickImmediately: true },
+//             { text: Common.install, clickImmediately: true },
 //             disposables
 //         );
 
@@ -80,23 +77,23 @@
 //         vscodeNotebook = api.serviceContainer.get<IVSCodeNotebook>(IVSCodeNotebook);
 //         controllerManager = api.serviceContainer.get<INotebookControllerManager>(INotebookControllerManager);
 //         notebookProvider = api.serviceContainer.get<INotebookProvider>(INotebookProvider);
-//         traceInfo('Suite Setup (completed)');
+//         logger.info('Suite Setup (completed)');
 //     });
 //     // Use same notebook without starting kernel in every single test (use one for whole suite).
 //     setup(async function () {
-//         traceInfo(`Start Test ${this.currentTest?.title}`);
+//         logger.info(`Start Test ${this.currentTest?.title}`);
 //         sinon.restore();
 //         await startJupyterServer();
 //         await createEmptyPythonNotebook(disposables);
 //         assert.isOk(vscodeNotebook.activeNotebookEditor, 'No active notebook');
-//         traceInfo(`Start Test (completed) ${this.currentTest?.title}`);
+//         logger.info(`Start Test (completed) ${this.currentTest?.title}`);
 //     });
 //     teardown(async function () {
-//         traceInfo(`Ended Test ${this.currentTest?.title}`);
+//         logger.info(`Ended Test ${this.currentTest?.title}`);
 //         // Added temporarily to identify why tests are failing.
 //         process.env.VSC_JUPYTER_LOG_KERNEL_OUTPUT = undefined;
 //         await closeNotebooksAndCleanUpAfterTests(disposables);
-//         traceInfo(`Ended Test (completed) ${this.currentTest?.title}`);
+//         logger.info(`Ended Test (completed) ${this.currentTest?.title}`);
 //     });
 //     suiteTeardown(() => closeNotebooksAndCleanUpAfterTests(disposables));
 //     function createKernelWithMockJupyterSession(notebook: NotebookDocument, session: IJupyterKernelConnectionSession) {
@@ -119,7 +116,7 @@
 //         const observableResult = new Subject();
 //         observableResult.next();
 //         observableResult.complete();
-//         const kernelSocket = new Subject<KernelSocketInformation>();
+//         const kernelSocket = new Subject<void>();
 //         kernelSocket.next();
 //         kernelSocket.complete();
 //         // when(inotebook.kernelSocket).thenReturn(kernelSocket.asObservable());

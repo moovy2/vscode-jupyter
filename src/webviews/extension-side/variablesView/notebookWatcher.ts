@@ -1,26 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import { inject, injectable } from 'inversify';
-import {
-    Event,
-    EventEmitter,
-    NotebookCell,
-    NotebookCellExecutionState,
-    NotebookCellExecutionStateChangeEvent,
-    NotebookDocument,
-    NotebookEditor
-} from 'vscode';
-import '../../../platform/common/extensions';
+import { Event, EventEmitter, NotebookCell, NotebookDocument, NotebookEditor, window, workspace } from 'vscode';
 import { IKernel, IKernelProvider } from '../../../kernels/types';
 import { IActiveNotebookChangedEvent, INotebookWatcher } from './types';
 import { IInteractiveWindowProvider } from '../../../interactive-window/types';
-import { IVSCodeNotebook } from '../../../platform/common/application/types';
 import { IDisposableRegistry } from '../../../platform/common/types';
 import { IDataViewerFactory } from '../dataviewer/types';
 import { JupyterNotebookView } from '../../../platform/common/constants';
 import { isJupyterNotebook } from '../../../platform/common/utils';
+import {
+    NotebookCellExecutionState,
+    notebookCellExecutions,
+    type NotebookCellExecutionStateChangeEvent
+} from '../../../platform/notebooks/cellExecutionStateService';
 
 type KernelStateEventArgs = {
     notebook: NotebookDocument;
@@ -40,14 +34,14 @@ export class NotebookWatcher implements INotebookWatcher {
     public get onDidChangeActiveNotebook(): Event<IActiveNotebookChangedEvent> {
         return this._onDidChangeActiveNotebook.event;
     }
-    public get onDidExecuteActiveNotebook(): Event<{ executionCount: number }> {
-        return this._onDidExecuteActiveNotebook.event;
+    public get onDidFinishExecutingActiveNotebook(): Event<{ executionCount: number }> {
+        return this._onDidFinisheExecutingActiveNotebook.event;
     }
     public get onDidRestartActiveNotebook(): Event<void> {
         return this._onDidRestartActiveNotebook.event;
     }
     public get activeKernel(): IKernel | undefined {
-        const activeNotebook = this.notebooks.activeNotebookEditor?.notebook;
+        const activeNotebook = window.activeNotebookEditor?.notebook;
         const activeJupyterNotebookKernel =
             activeNotebook?.notebookType == JupyterNotebookView ? this.kernelProvider.get(activeNotebook) : undefined;
 
@@ -73,7 +67,7 @@ export class NotebookWatcher implements INotebookWatcher {
         return activeNotebook ? this._executionCountTracker.get(activeNotebook) : undefined;
     }
 
-    private readonly _onDidExecuteActiveNotebook = new EventEmitter<{ executionCount: number }>();
+    private readonly _onDidFinisheExecutingActiveNotebook = new EventEmitter<{ executionCount: number }>();
     private readonly _onDidChangeActiveNotebook = new EventEmitter<{
         executionCount?: number;
     }>();
@@ -86,12 +80,11 @@ export class NotebookWatcher implements INotebookWatcher {
         @inject(IInteractiveWindowProvider) private interactiveWindowProvider: IInteractiveWindowProvider,
         @inject(IKernelProvider) private readonly kernelProvider: IKernelProvider,
         @inject(IDataViewerFactory) private readonly dataViewerFactory: IDataViewerFactory,
-        @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry,
-        @inject(IVSCodeNotebook) private readonly notebooks: IVSCodeNotebook
+        @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry
     ) {
         // We need to know if kernel state changes or if the active notebook editor is changed
-        this.notebooks.onDidChangeActiveNotebookEditor(this.activeEditorChanged, this, this.disposables);
-        this.notebooks.onDidCloseNotebookDocument(this.notebookEditorClosed, this, this.disposables);
+        window.onDidChangeActiveNotebookEditor(this.activeEditorChanged, this, this.disposables);
+        workspace.onDidCloseNotebookDocument(this.notebookEditorClosed, this, this.disposables);
         this.kernelProvider.onDidRestartKernel(
             (kernel) => {
                 this.handleRestart({ state: KernelState.restarted, notebook: kernel.notebook });
@@ -99,7 +92,7 @@ export class NotebookWatcher implements INotebookWatcher {
             this,
             this.disposables
         );
-        notebooks.onDidChangeNotebookCellExecutionState(
+        notebookCellExecutions.onDidChangeNotebookCellExecutionState(
             this.onDidChangeNotebookCellExecutionState,
             this,
             this.disposables
@@ -110,7 +103,7 @@ export class NotebookWatcher implements INotebookWatcher {
         if (!interactiveWindow) {
             return;
         }
-        return this.notebooks.notebookDocuments.find(
+        return workspace.notebookDocuments.find(
             (notebookDocument) => notebookDocument === interactiveWindow?.notebookDocument
         );
     }
@@ -149,9 +142,14 @@ export class NotebookWatcher implements INotebookWatcher {
                 this.isActiveNotebookEvent(kernelStateEvent) &&
                 kernelStateEvent.cell?.executionSummary?.executionOrder !== undefined
             ) {
-                this._onDidExecuteActiveNotebook.fire({
-                    executionCount: kernelStateEvent.cell.executionSummary?.executionOrder
-                });
+                const doneExecuting =
+                    this.activeKernel &&
+                    this.kernelProvider.getKernelExecution(this.activeKernel).pendingCells.length === 0;
+                if (doneExecuting) {
+                    this._onDidFinisheExecutingActiveNotebook.fire({
+                        executionCount: kernelStateEvent.cell.executionSummary?.executionOrder
+                    });
+                }
             }
         }
     }

@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 /* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires */
 import { assert, expect } from 'chai';
 import * as fs from 'fs-extra';
@@ -10,8 +8,7 @@ import * as os from 'os';
 import * as path from '../../../platform/vscode-path/path';
 import * as sinon from 'sinon';
 import { Common, DataScience } from '../../../platform/common/utils/localize';
-import { IVSCodeNotebook } from '../../../platform/common/application/types';
-import { traceInfo } from '../../../platform/logging';
+import { logger } from '../../../platform/logging';
 import { IConfigurationService, IDisposable } from '../../../platform/common/types';
 import { captureScreenShot, IExtensionTestApi, PYTHON_PATH } from '../../common.node';
 import { initialize } from '../../initialize.node';
@@ -27,8 +24,8 @@ import {
 import { commands, ConfigurationTarget, Uri, window, workspace } from 'vscode';
 import { createDeferred } from '../../../platform/common/utils/async';
 import { EXTENSION_ROOT_DIR_FOR_TESTS } from '../../constants.node';
-import { ProductNames } from '../../../kernels/installer/productNames';
-import { Product } from '../../../kernels/installer/types';
+import { ProductNames } from '../../../platform/interpreter/installer/productNames';
+import { Product } from '../../../platform/interpreter/installer/types';
 import { ProcessService } from '../../../platform/common/process/proc.node';
 import { INbConvertInterpreterDependencyChecker, INotebookImporter } from '../../../kernels/jupyter/types';
 import { JupyterImporter } from '../../../standalone/import-export/jupyterImporter.node';
@@ -36,16 +33,16 @@ import { IInterpreterService } from '../../../platform/interpreter/contracts';
 import { CodeSnippets, Identifiers } from '../../../platform/common/constants';
 import { noop } from '../../../platform/common/utils/misc';
 import { PythonEnvironment } from '../../../platform/pythonEnvironments/info';
+import { format } from '../../../platform/common/helpers';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
 const expectedPromptMessageSuffix = `requires ${ProductNames.get(Product.ipykernel)!} to be installed.`;
 
 /* eslint-disable @typescript-eslint/no-explicit-any, no-invalid-this */
-suite('DataScience - VSCode Notebook - (Export) (slow)', function () {
+suite('Export @export', function () {
     let api: IExtensionTestApi;
     const disposables: IDisposable[] = [];
     let proc: ProcessService;
-    let vscodeNotebook: IVSCodeNotebook;
     let importer: JupyterImporter;
     let nbConvertDependencyChecker: INbConvertInterpreterDependencyChecker;
     let interpreterService: IInterpreterService;
@@ -54,7 +51,7 @@ suite('DataScience - VSCode Notebook - (Export) (slow)', function () {
     let template: string;
     this.timeout(120_000);
     suiteSetup(async function () {
-        traceInfo('Suite Setup');
+        logger.info('Suite Setup');
         this.timeout(120_000);
         try {
             api = await initialize();
@@ -66,14 +63,13 @@ suite('DataScience - VSCode Notebook - (Export) (slow)', function () {
             await hijackPrompt(
                 'showErrorMessage',
                 { endsWith: expectedPromptMessageSuffix },
-                { result: Common.install(), clickImmediately: true },
+                { result: Common.install, clickImmediately: true },
                 disposables
             );
 
             sinon.restore();
-            vscodeNotebook = api.serviceContainer.get<IVSCodeNotebook>(IVSCodeNotebook);
             proc = new ProcessService();
-            traceInfo('Suite Setup (completed)');
+            logger.info('Suite Setup (completed)');
         } catch (e) {
             await captureScreenShot('export-suite');
             throw e;
@@ -86,14 +82,14 @@ suite('DataScience - VSCode Notebook - (Export) (slow)', function () {
     // Use same notebook without starting kernel in every single test (use one for whole suite).
     setup(async function () {
         try {
-            traceInfo(`Start Test ${this.currentTest?.title}`);
+            logger.info(`Start Test ${this.currentTest?.title}`);
             sinon.restore();
             await startJupyterServer();
             await createEmptyPythonNotebook(disposables);
-            assert.isOk(vscodeNotebook.activeNotebookEditor, 'No active notebook');
-            traceInfo(`Start Test (completed) ${this.currentTest?.title}`);
+            assert.isOk(window.activeNotebookEditor, 'No active notebook');
+            logger.info(`Start Test (completed) ${this.currentTest?.title}`);
             activeInterpreter = (await interpreterService.getActiveInterpreter(
-                vscodeNotebook.activeNotebookEditor?.notebook.uri
+                window.activeNotebookEditor?.notebook.uri
             ))!;
             defaultCellMarker =
                 api.serviceContainer.get<IConfigurationService>(IConfigurationService).getSettings()
@@ -108,7 +104,7 @@ suite('DataScience - VSCode Notebook - (Export) (slow)', function () {
         }
     });
     teardown(async function () {
-        traceInfo(`Ended Test ${this.currentTest?.title}`);
+        logger.info(`Ended Test ${this.currentTest?.title}`);
         if (this.currentTest?.isFailed()) {
             await captureScreenShot(this);
         }
@@ -117,7 +113,7 @@ suite('DataScience - VSCode Notebook - (Export) (slow)', function () {
         await settings.update('pythonExportMethod', 'direct', ConfigurationTarget.Global);
 
         await closeNotebooksAndCleanUpAfterTests(disposables);
-        traceInfo(`Ended Test (completed) ${this.currentTest?.title}`);
+        logger.info(`Ended Test (completed) ${this.currentTest?.title}`);
     });
     suiteTeardown(() => closeNotebooksAndCleanUpAfterTests(disposables));
     test('Export a basic notebook document', async () => {
@@ -222,10 +218,10 @@ suite('DataScience - VSCode Notebook - (Export) (slow)', function () {
         ]);
 
         // Verify text content
-        const prefix = DataScience.instructionComments().format(defaultCellMarker);
+        const prefix = DataScience.instructionComments(defaultCellMarker);
         let expectedContents = output.stdout;
         if (expectedContents.includes('get_ipython')) {
-            expectedContents = CodeSnippets.ImportIPython.format(defaultCellMarker, expectedContents);
+            expectedContents = format(CodeSnippets.ImportIPython, defaultCellMarker, expectedContents);
         }
         expectedContents = prefix.concat(expectedContents);
 

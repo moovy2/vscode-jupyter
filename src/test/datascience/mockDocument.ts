@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import {
     EndOfLine,
     NotebookDocument,
@@ -20,7 +19,11 @@ class MockLine implements TextLine {
     private _firstNonWhitespaceIndex: number | undefined;
     private _isEmpty: boolean | undefined;
 
-    constructor(private _contents: string, private _line: number, private _offset: number) {
+    constructor(
+        private _contents: string,
+        private _line: number,
+        private _offset: number
+    ) {
         this._range = new Range(new Position(_line, 0), new Position(_line, _contents.length));
         this._rangeWithLineBreak = new Range(this.range.start, new Position(_line, _contents.length + 1));
     }

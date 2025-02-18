@@ -4,13 +4,12 @@
 import * as path from '../../../platform/vscode-path/path';
 import * as fs from 'fs-extra';
 import glob from 'glob';
-import { inject, injectable } from 'inversify';
+import { injectable } from 'inversify';
 import * as tmp from 'tmp';
 import { promisify } from 'util';
 import { TemporaryFile } from './types';
 import { IFileSystemNode } from './types.node';
 import { ENCODING, FileSystem as FileSystemBase } from './fileSystem';
-import { IExtensionContext, IHttpClient } from '../types';
 import { FileType, Uri } from 'vscode';
 import { getFilePath } from './fs-paths';
 
@@ -21,8 +20,8 @@ import { getFilePath } from './fs-paths';
 @injectable()
 export class FileSystem extends FileSystemBase implements IFileSystemNode {
     private globFiles: (pat: string, options?: { cwd: string; dot?: boolean }) => Promise<string[]>;
-    constructor(@inject(IExtensionContext) context: IExtensionContext, @inject(IHttpClient) httpClient: IHttpClient) {
-        super(context, httpClient);
+    constructor() {
+        super();
         this.globFiles = promisify(glob);
     }
 
@@ -110,13 +109,13 @@ export class FileSystem extends FileSystemBase implements IFileSystemNode {
             await this.vscfs.createDirectory(uri);
         }
     }
-    override async writeFile(uri: Uri, text: string | Buffer): Promise<void> {
+    override async writeFile(uri: Uri, text: string | Uint8Array): Promise<void> {
         if (isLocalFile(uri)) {
             const filename = getFilePath(uri);
             await fs.ensureDir(path.dirname(filename));
-            return fs.writeFile(filename, text);
+            return fs.writeFile(filename, typeof text === 'string' ? Buffer.from(text) : text);
         } else {
-            await this.vscfs.writeFile(uri, typeof text === 'string' ? Buffer.from(text) : text);
+            await this.vscfs.writeFile(uri, typeof text === 'string' ? new TextEncoder().encode(text) : text);
         }
     }
     override async copy(source: Uri, destination: Uri, options?: { overwrite: boolean }): Promise<void> {

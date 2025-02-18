@@ -3,7 +3,6 @@
 
 import { inject, injectable } from 'inversify';
 import { IPythonApiProvider, IPythonExtensionChecker } from '../api/types';
-import { IPythonExecutionFactory } from '../common/process/types.node';
 import { IDisposableRegistry, InterpreterUri, Resource } from '../common/types';
 import { createDeferred, Deferred } from '../common/utils/async';
 import { isResource, noop } from '../common/utils/misc';
@@ -11,11 +10,12 @@ import { IInterpreterService } from './contracts';
 import { PythonEnvironment } from '../pythonEnvironments/info';
 import { getComparisonKey } from '../vscode-path/resources';
 import { getTelemetrySafeHashedString, getTelemetrySafeVersion } from '../telemetry/helpers';
-import { IWorkspaceService } from '../common/application/types';
-import { traceDecoratorVerbose, traceError, traceWarning } from '../logging';
+import { logger } from '../logging';
 import { getDisplayPath } from '../common/platform/fs-paths.node';
 import { IInterpreterPackages } from './types';
-import { TraceOptions } from '../logging/types';
+import { IPythonExecutionFactory } from './types.node';
+import { getWorkspaceFolderIdentifier } from '../common/application/workspace.base';
+import { isCondaEnvironmentWithoutPython } from './helpers';
 
 const interestedPackages = new Set(
     [
@@ -52,8 +52,7 @@ export class InterpreterPackages implements IInterpreterPackages {
         @inject(IInterpreterService) private readonly interpreterService: IInterpreterService,
         @inject(IPythonExecutionFactory) private readonly executionFactory: IPythonExecutionFactory,
         @inject(IPythonApiProvider) private readonly apiProvider: IPythonApiProvider,
-        @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry,
-        @inject(IWorkspaceService) private readonly workspace: IWorkspaceService
+        @inject(IDisposableRegistry) private readonly disposables: IDisposableRegistry
     ) {
         InterpreterPackages._instance = this;
         this.apiProvider.onDidActivatePythonExtension(
@@ -104,7 +103,7 @@ export class InterpreterPackages implements IInterpreterPackages {
             return [];
         }
 
-        const workspaceKey = this.workspace.getWorkspaceFolderIdentifier(resource);
+        const workspaceKey = getWorkspaceFolderIdentifier(resource);
         if (!this.interpreterPackages.has(workspaceKey)) {
             const promise = this.listPackagesImpl(resource);
             this.interpreterPackages.set(workspaceKey, promise);
@@ -112,7 +111,7 @@ export class InterpreterPackages implements IInterpreterPackages {
                 if (this.interpreterPackages.get(workspaceKey) === promise) {
                     this.interpreterPackages.delete(workspaceKey)!;
                 }
-                traceWarning(`Failed to get list of installed packages for ${workspaceKey}`, ex);
+                logger.warn(`Failed to get list of installed packages for ${workspaceKey}`, ex);
             });
         }
         return this.interpreterPackages.get(workspaceKey)!.then((items) => Array.from(items));
@@ -130,7 +129,7 @@ export class InterpreterPackages implements IInterpreterPackages {
             const modules = JSON.parse(modulesOutput.stdout.split(separator)[1].trim()) as string[];
             return new Set(modules.concat(modules.map((item) => item.toLowerCase())));
         } else {
-            traceError(
+            logger.error(
                 `Failed to get list of installed packages for ${getDisplayPath(interpreter.uri)}`,
                 modulesOutput.stderr
             );
@@ -163,27 +162,27 @@ export class InterpreterPackages implements IInterpreterPackages {
         }
 
         const promise = this.getPackageInformation({ interpreter });
-        promise.finally(() => {
-            // If this promise was resolved, then remove it from the pending list.
-            // But cache for at least 5m (this is used only to diagnose failures in kernels).
-            const timer = setTimeout(() => {
-                if (this.pendingInterpreterInformation.get(key) === promise) {
-                    this.pendingInterpreterInformation.delete(key);
-                }
-            }, 300_000);
-            const disposable = { dispose: () => clearTimeout(timer) };
-            this.disposables.push(disposable);
-        });
+        promise
+            .finally(() => {
+                // If this promise was resolved, then remove it from the pending list.
+                // But cache for at least 5m (this is used only to diagnose failures in kernels).
+                const timer = setTimeout(() => {
+                    if (this.pendingInterpreterInformation.get(key) === promise) {
+                        this.pendingInterpreterInformation.delete(key);
+                    }
+                }, 300_000);
+                const disposable = { dispose: () => clearTimeout(timer) };
+                this.disposables.push(disposable);
+            })
+            .catch(noop);
         this.pendingInterpreterInformation.set(key, promise);
     }
 
-    @traceDecoratorVerbose(
-        'interpreterPackages getPackageInformation',
-        TraceOptions.BeforeCall | TraceOptions.Arguments
-    )
     private async getPackageInformation({ interpreter }: { interpreter: PythonEnvironment }) {
+        if (isCondaEnvironmentWithoutPython(interpreter)) {
+            return;
+        }
         const service = await this.executionFactory.createActivatedEnvironment({
-            allowEnvironmentFetchExceptions: true,
             interpreter
         });
 

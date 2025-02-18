@@ -1,10 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import { IStartupCodeProvider, ITracebackFormatter } from '../kernels/types';
-import { IExtensionSingleActivationService, IExtensionSyncActivationService } from '../platform/activation/types';
+import { ITracebackFormatter } from '../kernels/types';
+import { IExtensionSyncActivationService } from '../platform/activation/types';
 import { IServiceManager } from '../platform/ioc/types';
 import { CommandRegistry } from './commands/commandRegistry';
 import { CodeLensFactory } from './editor-integration/codeLensFactory';
@@ -15,10 +13,11 @@ import {
     ICodeWatcher,
     ICodeLensFactory,
     IDataScienceCodeLensProvider,
-    ICodeGeneratorFactory
+    ICodeGeneratorFactory,
+    ICellRangeCache
 } from './editor-integration/types';
-import { InteractiveWindowProvider } from './interactiveWindowProvider';
-import { IInteractiveWindowDebuggingManager, IInteractiveWindowProvider } from './types';
+import { InteractiveWindowProvider, ReplNotebookTrackerService } from './interactiveWindowProvider';
+import { IInteractiveControllerHelper, IInteractiveWindowDebuggingManager, IInteractiveWindowProvider } from './types';
 import { CodeGeneratorFactory } from './editor-integration/codeGeneratorFactory';
 import { GeneratedCodeStorageFactory } from './editor-integration/generatedCodeStorageFactory';
 import { IGeneratedCodeStorageFactory } from './editor-integration/types';
@@ -28,10 +27,19 @@ import { InteractiveWindowDebuggingManager } from './debugger/jupyter/debuggingM
 import { InteractiveWindowDebuggingStartupCodeProvider } from './debugger/startupCodeProvider';
 import { PythonCellFoldingProvider } from './editor-integration/pythonCellFoldingProvider';
 import { CodeLensProviderActivator } from './editor-integration/codelensProviderActivator';
+import { InteractiveControllerHelper } from './InteractiveControllerHelper';
+import { IReplNotebookTrackerService } from '../platform/notebooks/replNotebookTrackerService';
+import { CellRangeCache } from './editor-integration/cellRangeCache';
 
 export function registerTypes(serviceManager: IServiceManager) {
     serviceManager.addSingleton<IInteractiveWindowProvider>(IInteractiveWindowProvider, InteractiveWindowProvider);
-    serviceManager.addSingleton<IExtensionSingleActivationService>(IExtensionSingleActivationService, CommandRegistry);
+    serviceManager.addSingleton<IReplNotebookTrackerService>(IReplNotebookTrackerService, ReplNotebookTrackerService);
+    serviceManager.addSingleton<IInteractiveControllerHelper>(
+        IInteractiveControllerHelper,
+        InteractiveControllerHelper
+    );
+    serviceManager.addSingleton<IExtensionSyncActivationService>(IExtensionSyncActivationService, CommandRegistry);
+    serviceManager.addSingleton<ICellRangeCache>(ICellRangeCache, CellRangeCache);
     serviceManager.add<ICodeWatcher>(ICodeWatcher, CodeWatcher);
     serviceManager.addSingleton<ICodeLensFactory>(ICodeLensFactory, CodeLensFactory);
     serviceManager.addSingleton<IDataScienceCodeLensProvider>(
@@ -46,7 +54,7 @@ export function registerTypes(serviceManager: IServiceManager) {
         IExtensionSyncActivationService,
         PythonCellFoldingProvider
     );
-    serviceManager.addSingleton<IExtensionSingleActivationService>(IExtensionSingleActivationService, Decorator);
+    serviceManager.addSingleton<IExtensionSyncActivationService>(IExtensionSyncActivationService, Decorator);
     serviceManager.addSingleton<IExtensionSyncActivationService>(
         IExtensionSyncActivationService,
         GeneratedCodeStorageManager
@@ -63,10 +71,10 @@ export function registerTypes(serviceManager: IServiceManager) {
         IInteractiveWindowDebuggingManager,
         InteractiveWindowDebuggingManager,
         undefined,
-        [IExtensionSingleActivationService]
+        [IExtensionSyncActivationService]
     );
-    serviceManager.addSingleton<IStartupCodeProvider>(
-        IStartupCodeProvider,
+    serviceManager.addSingleton<IExtensionSyncActivationService>(
+        IExtensionSyncActivationService,
         InteractiveWindowDebuggingStartupCodeProvider
     );
 }

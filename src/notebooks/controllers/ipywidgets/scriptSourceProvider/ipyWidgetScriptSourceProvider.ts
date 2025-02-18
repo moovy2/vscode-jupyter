@@ -1,11 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
-import '../../../../platform/common/extensions';
-import { traceError, traceInfo } from '../../../../platform/logging';
-import { WidgetCDNs, IConfigurationService, IHttpClient, IDisposable } from '../../../../platform/common/types';
+import { logger } from '../../../../platform/logging';
+import { WidgetCDNs, IConfigurationService } from '../../../../platform/common/types';
 import { sendTelemetryEvent, Telemetry } from '../../../../telemetry';
 import { getTelemetrySafeHashedString } from '../../../../platform/telemetry/helpers';
 import { IKernel } from '../../../../kernels/types';
@@ -16,11 +13,12 @@ import {
     WidgetScriptSource
 } from '../types';
 import { CDNWidgetScriptSourceProvider } from './cdnWidgetScriptSourceProvider';
-import { disposeAllDisposables } from '../../../../platform/common/helpers';
+import { DisposableBase } from '../../../../platform/common/utils/lifecycle';
 import { Disposable } from 'vscode';
 import type { IAnyMessageArgs, IKernelConnection } from '@jupyterlab/services/lib/kernel/kernel';
 import type { ICommOpenMsg } from '@jupyterlab/services/lib/kernel/messages';
 import { swallowExceptions } from '../../../../platform/common/utils/decorators';
+import { noop } from '../../../../platform/common/utils/misc';
 
 /**
  * This class decides where to get widget scripts from.
@@ -28,33 +26,26 @@ import { swallowExceptions } from '../../../../platform/common/utils/decorators'
  * If user changes the order, this will react to those configuration setting changes.
  * If user has not configured antying, user will be presented with a prompt.
  */
-export class IPyWidgetScriptSourceProvider implements IWidgetScriptSourceProvider {
+export class IPyWidgetScriptSourceProvider extends DisposableBase implements IWidgetScriptSourceProvider {
+    id = 'all';
     private readonly scriptProviders: IWidgetScriptSourceProvider[];
     private get configuredScriptSources(): readonly WidgetCDNs[] {
         const settings = this.configurationSettings.getSettings(undefined);
         return settings.widgetScriptSources;
     }
-    private readonly disposables: IDisposable[] = [];
     private static trackedWidgetModuleNames = new Set<string>();
     constructor(
         private readonly kernel: IKernel,
         private readonly localResourceUriConverter: ILocalResourceUriConverter,
         private readonly configurationSettings: IConfigurationService,
-        private readonly httpClient: IHttpClient,
         private readonly sourceProviderFactory: IWidgetScriptSourceProviderFactory,
         private readonly isWebViewOnline: Promise<boolean>,
         private readonly cdnScriptProvider: CDNWidgetScriptSourceProvider
     ) {
-        this.scriptProviders = this.sourceProviderFactory.getProviders(
-            this.kernel,
-            this.localResourceUriConverter,
-            this.httpClient
-        );
+        super();
+        this.scriptProviders = this.sourceProviderFactory.getProviders(this.kernel, this.localResourceUriConverter);
+        this.scriptProviders.forEach((c) => this._register(c));
         this.monitorKernel();
-    }
-    public dispose() {
-        disposeAllDisposables(this.disposables);
-        this.disposeScriptProviders();
     }
     public async getBaseUrl() {
         const provider = this.scriptProviders.find((item) => item.getBaseUrl);
@@ -85,7 +76,7 @@ export class IPyWidgetScriptSourceProvider implements IWidgetScriptSourceProvide
         const isWebViewOnline = await this.isWebViewOnline;
 
         // Get script sources in order, if one works, then get out.
-        const scriptSourceProviders = (this.scriptProviders || []).slice();
+        const scriptSourceProviders = this.scriptProviders.slice();
         let found: WidgetScriptSource = { moduleName };
         while (scriptSourceProviders.length) {
             const scriptProvider = scriptSourceProviders.shift();
@@ -97,13 +88,23 @@ export class IPyWidgetScriptSourceProvider implements IWidgetScriptSourceProvide
             if (source.scriptUri) {
                 found = source;
                 break;
+            } else {
+                logger.warn(
+                    `Widget Script Source not found for ${moduleName}@${moduleVersion} from ${scriptProvider.id}`
+                );
             }
         }
-        this.sendTelemetryForWidgetModule(moduleName, moduleVersion, '', found.source).ignoreErrors();
+        this.sendTelemetryForWidgetModule(moduleName, moduleVersion, '', found.source).catch(noop);
         if (!found.scriptUri) {
-            traceError(`Script source for Widget ${moduleName}@${moduleVersion} not found`);
+            logger.error(
+                `Script source for Widget ${moduleName}@${moduleVersion} not found in ${this.scriptProviders
+                    .map((item) => item.id)
+                    .join(', ')}`
+            );
         } else {
-            traceInfo(`Script source for Widget ${moduleName}@${moduleVersion} was found from source ${found.source}`);
+            logger.trace(
+                `Script source for Widget ${moduleName}@${moduleVersion} was found from source ${found.source} and ${found.scriptUri}`
+            );
         }
         return found;
     }
@@ -144,20 +145,11 @@ export class IPyWidgetScriptSourceProvider implements IWidgetScriptSourceProvide
             cdnSearched: this.configuredScriptSources.length > 0
         });
     }
-    private disposeScriptProviders() {
-        while (this.scriptProviders && this.scriptProviders.length) {
-            const item = this.scriptProviders.shift();
-            if (item) {
-                item.dispose();
-            }
-        }
-    }
     private monitorKernel() {
-        this.kernel.onStarted(this.hookKernelEvents, this, this.disposables);
-        this.kernel.onRestarted(this.hookKernelEvents, this, this.disposables);
-
-        const subscription = this.kernel.kernelSocket.subscribe(() => this.hookKernelEvents());
-        this.disposables.push(new Disposable(() => subscription.unsubscribe()));
+        this.hookKernelEvents();
+        this._register(this.kernel.onStarted(this.hookKernelEvents, this));
+        this._register(this.kernel.onRestarted(this.hookKernelEvents, this));
+        this._register(this.kernel.onDidKernelSocketChange(() => this.hookKernelEvents(), this));
     }
     private hookKernelEvents() {
         const kernelConnection = this.kernel.session?.kernel;
@@ -165,7 +157,7 @@ export class IPyWidgetScriptSourceProvider implements IWidgetScriptSourceProvide
             return;
         }
         kernelConnection.anyMessage.connect(this.onAnyMessage, this);
-        this.disposables.push(new Disposable(() => kernelConnection.anyMessage.disconnect(this.onAnyMessage, this)));
+        this._register(new Disposable(() => kernelConnection.anyMessage.disconnect(this.onAnyMessage, this)));
     }
     @swallowExceptions()
     private onAnyMessage(_: IKernelConnection, msg: IAnyMessageArgs) {
@@ -179,7 +171,7 @@ export class IPyWidgetScriptSourceProvider implements IWidgetScriptSourceProvide
                     data.state?._model_module,
                     data.state?._model_module_version || '',
                     data.state?._model_name
-                ).ignoreErrors();
+                ).catch(noop);
             }
         }
     }

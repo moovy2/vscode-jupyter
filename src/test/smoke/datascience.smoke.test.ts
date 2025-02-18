@@ -1,46 +1,48 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { assert } from 'chai';
 /* eslint-disable , no-invalid-this, @typescript-eslint/no-explicit-any */
-
 import * as fs from 'fs-extra';
 import * as path from '../../platform/vscode-path/path';
 import * as vscode from 'vscode';
-import { IInteractiveWindowProvider } from '../../interactive-window/types';
-import { traceInfo } from '../../platform/logging';
-import { IInterpreterService } from '../../platform/interpreter/contracts';
-import { IExtensionTestApi, setAutoSaveDelayInWorkspaceRoot, waitForCondition } from '../common.node';
-import { EXTENSION_ROOT_DIR_FOR_TESTS, IS_SMOKE_TEST } from '../constants.node';
+import { logger } from '../../platform/logging';
+import { PYTHON_PATH, setAutoSaveDelayInWorkspaceRoot, waitForCondition } from '../common.node';
+import { EXTENSION_ROOT_DIR_FOR_TESTS, IS_SMOKE_TEST, JVSC_EXTENSION_ID_FOR_TESTS } from '../constants.node';
 import { sleep } from '../core';
 import { closeActiveWindows, initialize, initializeTest } from '../initialize.node';
 import { captureScreenShot } from '../common';
+import { getCachedEnvironments } from '../../platform/interpreter/helpers';
+import { PythonExtension, type EnvironmentPath } from '@vscode/python-extension';
+
+type JupyterApi = {
+    openNotebook(uri: vscode.Uri, env: EnvironmentPath): Promise<void>;
+};
 
 const timeoutForCellToRun = 3 * 60 * 1_000;
-suite('Smoke Tests', () => {
-    let api: IExtensionTestApi;
+suite('Smoke Tests', function () {
+    this.timeout(timeoutForCellToRun);
     suiteSetup(async function () {
+        this.timeout(timeoutForCellToRun);
         if (!IS_SMOKE_TEST()) {
             return this.skip();
         }
-        api = await initialize();
+        await initialize();
         await setAutoSaveDelayInWorkspaceRoot(1);
     });
     setup(async function () {
-        traceInfo(`Start Test ${this.currentTest?.title}`);
+        logger.info(`Start Test ${this.currentTest?.title}`);
         await initializeTest();
-        traceInfo(`Start Test Completed ${this.currentTest?.title}`);
+        logger.info(`Start Test Completed ${this.currentTest?.title}`);
     });
     suiteTeardown(closeActiveWindows);
     teardown(async function () {
-        traceInfo(`End Test ${this.currentTest?.title}`);
+        logger.info(`End Test ${this.currentTest?.title}`);
         if (this.currentTest?.isFailed()) {
             await captureScreenShot(this);
         }
         await closeActiveWindows();
-        traceInfo(`End Test Compelete ${this.currentTest?.title}`);
+        logger.info(`End Test Complete ${this.currentTest?.title}`);
     });
 
     // test('Run Cell in interactive window', async () => {
@@ -70,7 +72,7 @@ suite('Smoke Tests', () => {
     //     console.log('Step4');
     // }).timeout(timeoutForCellToRun);
 
-    test('Run Cell in native editor', async function () {
+    test('Run Cell in Notebook', async function () {
         const file = path.join(
             EXTENSION_ROOT_DIR_FOR_TESTS,
             'src',
@@ -87,13 +89,27 @@ suite('Smoke Tests', () => {
         if (await fs.pathExists(outputFile)) {
             await fs.unlink(outputFile);
         }
-        await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jupyter-notebook');
+        logger.info(`Opening notebook file ${file}`);
+        const notebook = await vscode.workspace.openNotebookDocument(vscode.Uri.file(file));
+        await vscode.window.showNotebookDocument(notebook);
 
-        // Wait for 15 seconds for notebook to launch.
-        // Unfortunately there's no way to know for sure it has completely loaded.
-        await sleep(15_000);
+        let pythonPath = PYTHON_PATH;
+        const nb = vscode.window.activeNotebookEditor?.notebook;
+        if (!nb) {
+            throw new Error('No active notebook');
+        }
+        const pythonEnv = await PythonExtension.api().then((api) => api.environments.resolveEnvironment(pythonPath));
+        if (!pythonEnv) {
+            throw new Error(`Python environment not found ${pythonPath}`);
+        }
+        const jupyterExt = vscode.extensions.getExtension<JupyterApi>(JVSC_EXTENSION_ID_FOR_TESTS);
+        if (!jupyterExt) {
+            throw new Error('Jupyter extension not found');
+        }
+        await jupyterExt?.activate();
+        await jupyterExt.exports.openNotebook(nb.uri, pythonEnv);
 
-        await vscode.commands.executeCommand<void>('jupyter.runallcells');
+        await vscode.commands.executeCommand<void>('notebook.execute');
         const checkIfFileHasBeenCreated = () => fs.pathExists(outputFile);
         await waitForCondition(checkIfFileHasBeenCreated, timeoutForCellToRun, `"${outputFile}" file not created`);
 
@@ -106,24 +122,19 @@ suite('Smoke Tests', () => {
 
         // Make an interactive window
         await vscode.commands.executeCommand<void>('jupyter.createnewinteractive');
-        const provider = api.serviceManager.get<IInteractiveWindowProvider>(IInteractiveWindowProvider);
-        assert.ok(provider.windows.length === 1, 'Unexpected number of interactive windows created');
+        assert.ok(vscode.workspace.notebookDocuments.length === 1, 'Unexpected number of notebook documents created');
         // const currentWindow = provider.windows[0];
         // const interpreterForCurrentWindow = currentWindow.notebook?.getMatchingInterpreter();
         // assert.ok(interpreterForCurrentWindow !== undefined, 'Unable to get matching interpreter for current window');
 
         // Now change active interpreter
-        const interpreterService = api.serviceManager.get<IInterpreterService>(IInterpreterService);
         await waitForCondition(
-            async () => interpreterService.resolvedEnvironments.length > 0,
+            async () => getCachedEnvironments().length > 0,
             15_000,
             'Waiting for interpreters to be discovered'
         );
 
-        assert.ok(
-            interpreterService.resolvedEnvironments.length > 1,
-            'Not enough interpreters to run interactive window smoke test'
-        );
+        assert.ok(getCachedEnvironments().length > 1, 'Not enough interpreters to run interactive window smoke test');
         // const differentInterpreter = allInterpreters.find((interpreter) => interpreter !== interpreterForCurrentWindow);
         // await vscode.commands.executeCommand<void>('python.setInterpreter', differentInterpreter); // Requires change to Python extension
 

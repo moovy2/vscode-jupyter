@@ -1,26 +1,29 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
 import {
     Disposable,
-    NotebookCellExecutionStateChangeEvent,
     NotebookDocument,
     Position,
     Range,
     TextDocumentChangeEvent,
     TextDocumentContentChangeEvent,
-    Uri
+    Uri,
+    workspace
 } from 'vscode';
 
 import { splitMultilineString } from '../../platform/common/utils';
-import { IDocumentManager, IVSCodeNotebook } from '../../platform/common/application/types';
-import { traceInfo } from '../../platform/logging';
+import { logger } from '../../platform/logging';
 import { IConfigurationService, IDisposableRegistry } from '../../platform/common/types';
 import { uncommentMagicCommands } from './cellFactory';
 import { CellMatcher } from './cellMatcher';
 import { IGeneratedCode, IInteractiveWindowCodeGenerator, IGeneratedCodeStore, InteractiveCellMetadata } from './types';
 import { computeHash } from '../../platform/common/crypto';
+import {
+    NotebookCellExecutionState,
+    notebookCellExecutions,
+    type NotebookCellExecutionStateChangeEvent
+} from '../../platform/notebooks/cellExecutionStateService';
 
 // This class provides generated code for debugging jupyter cells. Call getGeneratedCode just before starting debugging to compute all of the
 // generated codes for cells & update the source maps in the python debugger.
@@ -31,17 +34,15 @@ export class CodeGenerator implements IInteractiveWindowCodeGenerator {
     private disposed?: boolean;
     private disposables: Disposable[] = [];
     constructor(
-        private readonly documentManager: IDocumentManager,
         private readonly configService: IConfigurationService,
         private readonly storage: IGeneratedCodeStore,
         private readonly notebook: NotebookDocument,
-        notebooks: IVSCodeNotebook,
         disposables: IDisposableRegistry
     ) {
         disposables.push(this);
         // Watch document changes so we can update our generated code
-        this.documentManager.onDidChangeTextDocument(this.onChangedDocument, this, this.disposables);
-        notebooks.onDidChangeNotebookCellExecutionState(this.onDidCellStateChange, this, this.disposables);
+        workspace.onDidChangeTextDocument(this.onChangedDocument, this, this.disposables);
+        notebookCellExecutions.onDidChangeNotebookCellExecutionState(this.onDidCellStateChange, this, this.disposables);
     }
 
     public dispose() {
@@ -109,7 +110,11 @@ export class CodeGenerator implements IInteractiveWindowCodeGenerator {
     }
 
     private onDidCellStateChange(e: NotebookCellExecutionStateChangeEvent) {
+        if (e.state !== NotebookCellExecutionState.Idle) {
+            return;
+        }
         if (
+            e.state !== NotebookCellExecutionState.Idle ||
             e.cell.notebook !== this.notebook ||
             !e.cell.executionSummary?.executionOrder ||
             this.cellIndexesCounted[e.cell.index]
@@ -131,7 +136,7 @@ export class CodeGenerator implements IInteractiveWindowCodeGenerator {
         // Find the text document that matches. We need more information than
         // the add code gives us
         const { lineIndex: cellLine, uristring } = metadata.interactive;
-        const doc = this.documentManager.textDocuments.find((d) => d.uri.toString() === uristring);
+        const doc = workspace.textDocuments.find((d) => d.uri.toString() === uristring);
         if (!doc) {
             return;
         }
@@ -191,7 +196,7 @@ export class CodeGenerator implements IInteractiveWindowCodeGenerator {
             hasCellMarker
         };
 
-        traceInfo(`Generated code for ${expectedCount} = ${runtimeFile} with ${stripped.length} lines`);
+        logger.info(`Generated code for ${expectedCount} = ${runtimeFile} with ${stripped.length} lines`);
         this.storage.store(Uri.parse(metadata.interactive.uristring), hash);
         return hash;
     }

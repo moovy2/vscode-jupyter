@@ -1,59 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 // import * as crypto from 'crypto';
 
 /* eslint-disable  */
 import { relative } from 'path';
 import * as vscode from 'vscode';
-import { NotebookEdit, SnippetTextEdit } from 'vscode';
+import { SnippetTextEdit } from 'vscode';
 import { vscMockHtmlContent } from './htmlContent';
 import { vscMockStrings } from './strings';
 import { vscUri } from './uri';
 import { generateUuid } from './uuid';
 
 export namespace vscMockExtHostedTypes {
-    export class NotebookCellMetadata {
-        constructor(
-            public readonly editable?: boolean,
-            public readonly breakpointMargin?: boolean,
-            public readonly runnable?: boolean,
-            public readonly executionOrder?: number,
-            public readonly runState?: NotebookCellRunState,
-            public readonly runStartTime?: number,
-            public readonly statusMessage?: string,
-            public readonly lastRunDuration?: number,
-            public readonly custom?: Record<string, any>
-        ) {}
-
-        // todo@API write a proper signature
-        with(change: {
-            editable?: boolean | null;
-            breakpointMargin?: boolean | null;
-            runnable?: boolean | null;
-            executionOrder?: number | null;
-            runState?: NotebookCellRunState | null;
-            runStartTime?: number | null;
-            statusMessage?: string | null;
-            lastRunDuration?: number | null;
-            custom?: Record<string, any> | null;
-        }): NotebookCellMetadata {
-            return new NotebookCellMetadata(
-                change.editable || this.editable,
-                change.breakpointMargin || this.breakpointMargin,
-                change.runnable || this.runnable,
-                change.executionOrder || this.executionOrder,
-                change.runState || this.runState,
-                change.runStartTime || this.runStartTime,
-                change.statusMessage || this.statusMessage,
-                change.lastRunDuration || this.lastRunDuration,
-                change.custom || this.custom
-            );
-        }
-    }
-
     export class NotebookCellOutputItem {
         static isNotebookCellOutputItem(obj: unknown): obj is vscode.NotebookCellOutputItem {
             if (obj instanceof NotebookCellOutputItem) {
@@ -101,7 +60,10 @@ export namespace vscMockExtHostedTypes {
             return NotebookCellOutputItem.text(rawStr, mime);
         }
 
-        constructor(public data: Uint8Array, public mime: string) {
+        constructor(
+            public data: Uint8Array,
+            public mime: string
+        ) {
             this.mime = mime;
         }
     }
@@ -169,11 +131,6 @@ export namespace vscMockExtHostedTypes {
          * A controller is preferred for a notebook.
          */
         Preferred = 2
-    }
-
-    export enum NotebookRunState {
-        Running = 1,
-        Idle = 2
     }
 
     export interface IRelativePattern {
@@ -953,7 +910,7 @@ export namespace vscMockExtHostedTypes {
                 this._tabstop = nested._tabstop;
                 defaultValue = nested.value;
             } else if (typeof defaultValue === 'string') {
-                defaultValue = defaultValue.replace(/\$|}/g, '\\$&');
+                defaultValue = defaultValue.replace(/\$|}/g, '\\$&'); // CodeQL [SM02383] This code is not used in production, only used for mocks in testing.
             }
 
             this.value += '${';
@@ -2110,7 +2067,7 @@ export namespace vscMockExtHostedTypes {
     export class TreeItem {
         label?: string;
         resourceUri?: vscUri.URI;
-        iconPath?: string | vscUri.URI | { light: string | vscUri.URI; dark: string | vscUri.URI };
+        iconPath?: IconPath;
         command?: vscode.Command;
         contextValue?: string;
         tooltip?: string;
@@ -2146,6 +2103,24 @@ export namespace vscMockExtHostedTypes {
             this.id = id;
         }
     }
+
+    /**
+     * Represents an icon in the UI. This is either an uri, separate uris for the light- and dark-themes,
+     * or a {@link ThemeIcon theme icon}.
+     */
+    export type IconPath =
+        | vscode.Uri
+        | {
+              /**
+               * The icon path for the light theme.
+               */
+              light: vscode.Uri;
+              /**
+               * The icon path for the dark theme.
+               */
+              dark: vscode.Uri;
+          }
+        | ThemeIcon;
 
     export class ThemeColor {
         id: string;
@@ -2372,7 +2347,13 @@ export namespace vscMockExtHostedTypes {
         static readonly Back: vscode.QuickInputButton = {} as any;
     }
     export class NotebookRendererScript {
-        constructor(public uri: vscode.Uri, public provides: string | string[] = []) {}
+        public readonly provides: string[];
+        constructor(
+            public uri: vscode.Uri,
+            provides: string | string[] = []
+        ) {
+            this.provides = typeof provides === 'string' ? [provides] : provides;
+        }
     }
     export class FileDecoration {
         badge?: string;
@@ -2384,6 +2365,187 @@ export namespace vscMockExtHostedTypes {
             this.badge = badge;
             this.tooltip = tooltip;
             this.color = color;
+        }
+    }
+    // https://github.com/microsoft/vscode/issues/115616 @alexr00
+
+    export enum PortAutoForwardAction {
+        /**
+         * Notify the user that the port is being forwarded. This is the default action.
+         */
+        Notify = 1,
+        /**
+         * Once the port is forwarded, open the user's web browser to the forwarded port.
+         */
+        OpenBrowser = 2,
+        /**
+         * Once the port is forwarded, open the preview browser to the forwarded port.
+         */
+        OpenPreview = 3,
+        /**
+         * Forward the port silently.
+         */
+        Silent = 4,
+        /**
+         * Do not forward the port.
+         */
+        Ignore = 5
+    }
+
+    export class PortAttributes {
+        /**
+         * The action to be taken when this port is detected for auto forwarding.
+         */
+        autoForwardAction: PortAutoForwardAction;
+        /**
+         * Creates a new PortAttributes object
+         * @param port the port number
+         * @param autoForwardAction the action to take when this port is detected
+         */
+        constructor(autoForwardAction: PortAutoForwardAction) {
+            this.autoForwardAction = autoForwardAction;
+        }
+    }
+
+    /**
+     * A notebook range represents an ordered pair of two cell indices.
+     * It is guaranteed that start is less than or equal to end.
+     */
+    export class NotebookRange {
+        /**
+         * `true` if `start` and `end` are equal.
+         */
+        get isEmpty(): boolean {
+            return this.start === this.end;
+        }
+
+        /**
+         * Create a new notebook range. If `start` is not
+         * before or equal to `end`, the values will be swapped.
+         *
+         * @param start start index
+         * @param end end index.
+         */
+        constructor(
+            public readonly start: number,
+            public readonly end: number
+        ) {}
+
+        /**
+         * Derive a new range for this range.
+         *
+         * @param change An object that describes a change to this range.
+         * @return A range that reflects the given change. Will return `this` range if the change
+         * is not changing anything.
+         */
+        with(change: { start?: number; end?: number }): NotebookRange {
+            return new NotebookRange(change.start || 0, change.end || 0);
+        }
+    }
+    export class NotebookEdit {
+        /**
+         * Utility to create a edit that replaces cells in a notebook.
+         *
+         * @param range The range of cells to replace
+         * @param newCells The new notebook cells.
+         */
+        static replaceCells(range: NotebookRange, newCells: vscode.NotebookCellData[]): NotebookEdit {
+            return new NotebookEdit(range, newCells);
+        }
+
+        /**
+         * Utility to create an edit that replaces cells in a notebook.
+         *
+         * @param index The index to insert cells at.
+         * @param newCells The new notebook cells.
+         */
+        static insertCells(index: number, newCells: vscode.NotebookCellData[]): NotebookEdit {
+            return new NotebookEdit(new NotebookRange(index, index), newCells);
+        }
+
+        /**
+         * Utility to create an edit that deletes cells in a notebook.
+         *
+         * @param range The range of cells to delete.
+         */
+        static deleteCells(range: NotebookRange): NotebookEdit {
+            return new NotebookEdit(range, []);
+        }
+
+        /**
+         * Utility to create an edit that update a cell's metadata.
+         *
+         * @param index The index of the cell to update.
+         * @param newCellMetadata The new metadata for the cell.
+         */
+        static updateCellMetadata(index: number, _newCellMetadata: { [key: string]: any }): NotebookEdit {
+            return new NotebookEdit(new NotebookRange(index, index), []);
+        }
+
+        /**
+         * Utility to create an edit that updates the notebook's metadata.
+         *
+         * @param newNotebookMetadata The new metadata for the notebook.
+         */
+        static updateNotebookMetadata(_newNotebookMetadata: { [key: string]: any }): NotebookEdit {
+            return new NotebookEdit(new NotebookRange(0, 0), []);
+        }
+
+        /**
+         * Optional new metadata for the cells.
+         */
+        newCellMetadata?: { [key: string]: any };
+
+        /**
+         * Optional new metadata for the notebook.
+         */
+        newNotebookMetadata?: { [key: string]: any };
+
+        constructor(
+            public readonly range: NotebookRange,
+            public readonly newCells: vscode.NotebookCellData[]
+        ) {}
+    }
+
+    /**
+     * The kind of {@link QuickPickItem quick pick item}.
+     */
+    export enum QuickPickItemKind {
+        /**
+         * When a {@link QuickPickItem} has a kind of {@link Separator}, the item is just a visual separator and does not represent a real item.
+         * The only property that applies is {@link QuickPickItem.label label }. All other properties on {@link QuickPickItem} will be ignored and have no effect.
+         */
+        Separator = -1,
+        /**
+         * The default {@link QuickPickItem.kind} is an item that can be selected in the quick pick.
+         */
+        Default = 0
+    }
+    export class NotebookCellData {
+        kind: NotebookCellKind;
+        value: string;
+        languageId: string;
+        mime?: string;
+        outputs?: vscode.NotebookCellOutput[];
+        metadata?: Record<string, any>;
+        executionSummary?: vscode.NotebookCellExecutionSummary;
+
+        constructor(
+            kind: NotebookCellKind,
+            value: string,
+            languageId: string,
+            mime?: string,
+            outputs?: vscode.NotebookCellOutput[],
+            metadata?: Record<string, any>,
+            executionSummary?: vscode.NotebookCellExecutionSummary
+        ) {
+            this.kind = kind;
+            this.value = value;
+            this.languageId = languageId;
+            this.mime = mime;
+            this.outputs = outputs ?? [];
+            this.metadata = metadata;
+            this.executionSummary = executionSummary;
         }
     }
 }

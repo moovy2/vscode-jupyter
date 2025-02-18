@@ -1,40 +1,42 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
-// Helper functions for dealing with kernels and kernelspecs
-
-// eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
-const NamedRegexp = require('named-js-regexp') as typeof import('named-js-regexp');
 import * as path from '../platform/vscode-path/path';
 import * as uriPath from '../platform/vscode-path/resources';
-import * as nbformat from '@jupyterlab/nbformat';
+import type * as nbformat from '@jupyterlab/nbformat';
 import type { Kernel, KernelSpec } from '@jupyterlab/services';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import cloneDeep = require('lodash/cloneDeep');
 import url from 'url-parse';
 import {
     KernelConnectionMetadata,
     LocalKernelSpecConnectionMetadata,
     LiveRemoteKernelConnectionMetadata,
     PythonKernelConnectionMetadata,
-    IJupyterKernelSpec,
-    IKernelConnectionSession
+    IJupyterKernelSpec
 } from './types';
-import { Uri } from 'vscode';
-import { IWorkspaceService } from '../platform/common/application/types';
+import { NotebookCellOutput, Uri, workspace } from 'vscode';
 import { PYTHON_LANGUAGE, Telemetry } from '../platform/common/constants';
-import { traceError, traceInfoIfCI, traceVerbose, traceWarning } from '../platform/logging';
+import { logger } from '../platform/logging';
 import { getDisplayPath, getFilePath } from '../platform/common/platform/fs-paths';
 import { DataScience } from '../platform/common/utils/localize';
 import { getNormalizedInterpreterPath, getInterpreterHash } from '../platform/pythonEnvironments/info/interpreter';
 import { getTelemetrySafeVersion } from '../platform/telemetry/helpers';
 import { EnvironmentType, PythonEnvironment } from '../platform/pythonEnvironments/info';
-import { deserializePythonEnvironment, serializePythonEnvironment } from '../platform/api/pythonApi';
+import { deserializePythonEnvironment } from '../platform/api/pythonApi';
 import { JupyterKernelSpec } from './jupyter/jupyterKernelSpec';
 import { sendTelemetryEvent } from '../telemetry';
 import { IPlatformService } from '../platform/common/platform/types';
+import { splitLines } from '../platform/common/helpers';
+import {
+    getCachedEnvironment,
+    getCachedVersion,
+    getEnvironmentType,
+    getPythonEnvDisplayName,
+    getPythonEnvironmentName,
+    isCondaEnvironmentWithoutPython
+} from '../platform/interpreter/helpers';
+import { cellOutputToVSCCellOutput } from './execution/helpers';
+import { handleTensorBoardDisplayDataOutput } from './execution/executionHelpers';
+import { once } from '../platform/common/utils/functional';
 
 // https://jupyter-client.readthedocs.io/en/stable/kernels.html
 export const connectionFilePlaceholder = '{connection_file}';
@@ -55,6 +57,21 @@ export async function createInterpreterKernelSpec(
     interpreter?: PythonEnvironment,
     rootKernelFilePath?: Uri
 ): Promise<IJupyterKernelSpec> {
+    return createInterpreterKernelSpecWithName(
+        await getInterpreterKernelSpecName(interpreter),
+        interpreter,
+        rootKernelFilePath
+    );
+}
+
+/**
+ * Create a default kernelspec with the given display name.
+ */
+export function createInterpreterKernelSpecWithName(
+    name: string,
+    interpreter?: PythonEnvironment,
+    rootKernelFilePath?: Uri
+): IJupyterKernelSpec {
     const interpreterMetadata = interpreter
         ? {
               path: getFilePath(interpreter.uri)
@@ -63,9 +80,9 @@ export async function createInterpreterKernelSpec(
     // This creates a kernel spec for an interpreter. When launched, 'python' argument will map to using the interpreter
     // associated with the current resource for launching.
     const defaultSpec: KernelSpec.ISpecModel = {
-        name: await getInterpreterKernelSpecName(interpreter),
+        name,
         language: 'python',
-        display_name: interpreter?.displayName || 'Python 3',
+        display_name: (interpreter ? getCachedEnvironment(interpreter)?.environment?.name : '') || 'Python 3',
         metadata: {
             interpreter: interpreterMetadata
         },
@@ -90,7 +107,7 @@ export async function createInterpreterKernelSpec(
 
 export function cleanEnvironment<T>(spec: T): T {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const copy = cloneDeep(spec) as unknown as { env?: any };
+    const copy = JSON.parse(JSON.stringify(spec)) as unknown as { env?: any };
 
     if (copy.env) {
         // Scrub the environment of the spec to make sure it has allowed values (they all must be strings)
@@ -106,6 +123,7 @@ export function cleanEnvironment<T>(spec: T): T {
         });
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return copy as any;
 }
 
@@ -130,7 +148,7 @@ export function isDefaultKernelSpec(kernelspec: IJupyterKernelSpec) {
     // // E.g. assume we're loading a kernlespec for a default Python kernel, the name would be `python3`
     // // However we give this a completely different name, and at that point its not possible to determine
     // // whether this is a default kernel or not.
-    // // Hence determine the original name baesed on the original kernelspec file.
+    // // Hence determine the original name based on the original kernelspec file.
     const originalSpecFile = kernelspec.metadata?.vscode?.originalSpecFile || kernelspec.metadata?.originalSpecFile;
     const name = originalSpecFile ? path.basename(path.dirname(originalSpecFile)) : kernelspec.name || '';
     const displayName = kernelspec.metadata?.vscode?.originalDisplayName || kernelspec.display_name || '';
@@ -151,7 +169,7 @@ export function isDefaultKernelSpec(kernelspec: IJupyterKernelSpec) {
 /**
  * When creating remote sessions, we generate bogus names for the notebook.
  * These names are prefixed with the same local file name, and a random suffix.
- * However the random part does contain an identifier, and we can stip this off
+ * However the random part does contain an identifier, and we can strip this off
  * to get the original local ipynb file name.
  */
 export function removeNotebookSuffixAddedByExtension(notebookPath: string) {
@@ -163,7 +181,9 @@ export function removeNotebookSuffixAddedByExtension(notebookPath: string) {
                 .search(guidRegEx) !== -1
         ) {
             const nbFile = notebookPath.substring(0, notebookPath.lastIndexOf(jvscIdentifier));
-            return nbFile.toLowerCase().endsWith('.ipynb') ? nbFile : `${nbFile}.ipynb`;
+            return nbFile.toLowerCase().endsWith('.ipynb') || nbFile.toLowerCase().endsWith('.py')
+                ? nbFile
+                : `${nbFile}.ipynb`;
         }
     }
     return notebookPath;
@@ -242,17 +262,15 @@ export function getDisplayNameOrNameOfKernelConnection(kernelConnection: KernelC
         case 'startUsingRemoteKernelSpec':
         case 'startUsingLocalKernelSpec': {
             if (
-                kernelConnection.interpreter?.envType &&
-                kernelConnection.interpreter.envType !== EnvironmentType.Unknown
+                kernelConnection.interpreter &&
+                getEnvironmentType(kernelConnection.interpreter) !== EnvironmentType.Unknown
             ) {
                 const envName = getPythonEnvironmentName(kernelConnection.interpreter);
                 if (kernelConnection.kernelSpec.language === PYTHON_LANGUAGE) {
                     const pythonVersion = `Python ${
-                        getTelemetrySafeVersion(kernelConnection.interpreter.version?.raw || '') || ''
+                        getTelemetrySafeVersion(getCachedVersion(kernelConnection.interpreter)) || ''
                     }`.trim();
-                    return kernelConnection.interpreter.envName
-                        ? `${oldDisplayName} (${pythonVersion})`
-                        : oldDisplayName;
+                    return envName ? `${oldDisplayName} (${pythonVersion})` : oldDisplayName;
                 } else {
                     // Non-Python kernelspec that launches via python interpreter
                     return envName ? `${oldDisplayName} (${envName})` : oldDisplayName;
@@ -263,11 +281,11 @@ export function getDisplayNameOrNameOfKernelConnection(kernelConnection: KernelC
         }
         case 'startUsingPythonInterpreter':
             const pythonVersion = (
-                getTelemetrySafeVersion(kernelConnection.interpreter.version?.raw || '') || ''
+                getTelemetrySafeVersion(getCachedVersion(kernelConnection.interpreter)) || ''
             ).trim();
             if (
-                kernelConnection.interpreter.envType &&
-                kernelConnection.interpreter.envType !== EnvironmentType.Unknown
+                kernelConnection.interpreter &&
+                getEnvironmentType(kernelConnection.interpreter) !== EnvironmentType.Unknown
             ) {
                 // If user has created a custom kernelspec, then use that.
                 if (
@@ -278,42 +296,18 @@ export function getDisplayNameOrNameOfKernelConnection(kernelConnection: KernelC
                     return kernelConnection.kernelSpec.display_name;
                 }
                 // If this is a conda environment without Python, then don't display `Python` in it.
-                const isEmptyVersion =
-                    !kernelConnection.interpreter.version ||
-                    (!kernelConnection.interpreter.version.major &&
-                        !kernelConnection.interpreter.version.minor &&
-                        !kernelConnection.interpreter.version.patch &&
-                        !kernelConnection.interpreter.version.raw);
-                const isCondaEnvWithoutPython =
-                    kernelConnection.interpreter.envType === EnvironmentType.Conda &&
-                    !kernelConnection.interpreter.sysPrefix &&
-                    isEmptyVersion &&
-                    (kernelConnection.interpreter.uri.path === '/python' ||
-                        kernelConnection.interpreter.uri.path === 'python');
+                const isCondaEnvWithoutPython = isCondaEnvironmentWithoutPython(kernelConnection.interpreter);
                 const pythonDisplayName = pythonVersion.trim() ? `Python ${pythonVersion}` : 'Python';
                 const envName = getPythonEnvironmentName(kernelConnection.interpreter);
                 if (isCondaEnvWithoutPython && envName) {
                     return envName;
                 }
                 return envName ? `${envName} (${pythonDisplayName})` : pythonDisplayName;
-            } else if (!oldDisplayName.includes(pythonVersion)) {
-                if (oldDisplayName === `Python ${pythonVersion.substring(0, 1)}`) {
-                    return `Python ${pythonVersion}`;
-                } else {
-                    return `${oldDisplayName} (Python ${pythonVersion})`;
-                }
+            } else {
+                return `Python ${pythonVersion}`.trim();
             }
     }
     return oldDisplayName;
-}
-function getPythonEnvironmentName(pythonEnv: PythonEnvironment) {
-    // Sometimes Python extension doesn't detect conda environments correctly (e.g. conda env create without a name).
-    // In such cases the envName is empty, but it has a path.
-    let envName = pythonEnv.envName;
-    if (pythonEnv.envPath && pythonEnv.envType === EnvironmentType.Conda && !pythonEnv.envName) {
-        envName = uriPath.basename(pythonEnv.envPath);
-    }
-    return envName;
 }
 function getOldFormatDisplayNameOrNameOfKernelConnection(kernelConnection: KernelConnectionMetadata | undefined) {
     if (!kernelConnection) {
@@ -329,9 +323,11 @@ function getOldFormatDisplayNameOrNameOfKernelConnection(kernelConnection: Kerne
             : kernelConnection.kernelSpec?.name;
 
     const interpreterName =
-        kernelConnection.kind === 'startUsingPythonInterpreter' ? kernelConnection.interpreter.displayName : undefined;
+        kernelConnection.kind === 'startUsingPythonInterpreter'
+            ? getPythonEnvDisplayName(kernelConnection.interpreter)
+            : undefined;
 
-    return displayName || name || interpreterName || '';
+    return [displayName, name, interpreterName, ''].find((item) => typeof item === 'string' && item.length > 0) || '';
 }
 
 export function getNameOfKernelConnection(
@@ -363,7 +359,8 @@ export function getKernelDisplayPathFromKernelConnection(kernelConnection?: Kern
         const pathValue =
             kernelSpec?.metadata?.interpreter?.path || kernelSpec?.interpreterPath || kernelSpec?.executable;
         if (pathValue === '/python' || pathValue === 'python') {
-            return kernelConnection.interpreter?.displayPath;
+            const env = getCachedEnvironment(kernelConnection.interpreter);
+            return env?.environment?.folderUri || (env ? Uri.file(env.path) : undefined);
         }
         return pathValue ? Uri.file(pathValue) : undefined;
     } else {
@@ -383,9 +380,19 @@ export function getRemoteKernelSessionInformation(
     defaultValue: string = ''
 ): string {
     if (kernelConnection?.kind === 'connectToLiveRemoteKernel') {
-        return DataScience.jupyterSelectURIRunningDetailFormat().format(
-            kernelConnection.kernelModel.lastActivityTime.toLocaleString(),
-            kernelConnection.kernelModel.numberOfConnections.toString()
+        let date: Date | undefined;
+        if (typeof kernelConnection.kernelModel.lastActivityTime === 'string') {
+            try {
+                date = new Date(kernelConnection.kernelModel.lastActivityTime);
+            } catch (ex) {
+                logger.debug(`Error parsing date ${ex}`);
+            }
+        } else {
+            date = kernelConnection.kernelModel.lastActivityTime;
+        }
+        return DataScience.jupyterSelectLiveRemoteKernelDescription(
+            date,
+            kernelConnection.kernelModel.numberOfConnections
         );
     }
     return defaultValue;
@@ -393,7 +400,6 @@ export function getRemoteKernelSessionInformation(
 
 export function getKernelConnectionDisplayPath(
     kernelConnection: KernelConnectionMetadata | undefined,
-    workspaceService: IWorkspaceService,
     platform: IPlatformService
 ) {
     if (kernelConnection?.kind === 'connectToLiveRemoteKernel') {
@@ -402,7 +408,7 @@ export function getKernelConnectionDisplayPath(
     const kernelPath = getKernelDisplayPathFromKernelConnection(kernelConnection);
     // If we have just one workspace folder opened, then ensure to use relative paths
     // where possible (e.g. for virtual environments).
-    const folders = workspaceService.workspaceFolders ? workspaceService.workspaceFolders : [];
+    const folders = workspace.workspaceFolders ? workspace.workspaceFolders : [];
     return kernelPath ? getDisplayPath(kernelPath, folders, platform.homeDir) : '';
 }
 
@@ -423,6 +429,18 @@ export function getInterpreterFromKernelConnectionMetadata(
         ? kernelConnection.kernelSpec
         : undefined;
     return deserializePythonEnvironment(kernelSpec?.metadata?.interpreter, '');
+}
+
+export function isUserRegisteredKernelSpecConnection(
+    kernelConnection: KernelConnectionMetadata
+): kernelConnection is LocalKernelSpecConnectionMetadata | PythonKernelConnectionMetadata {
+    return (
+        kernelConnection.kind === 'startUsingLocalKernelSpec' ||
+        (kernelConnection.kind === 'startUsingPythonInterpreter' &&
+            kernelConnection.kernelSpec &&
+            // Also include kernel Specs that are in a non-global directory.
+            getKernelRegistrationInfo(kernelConnection.kernelSpec) === 'registeredByNewVersionOfExtForCustomKernelSpec')
+    );
 }
 export function isPythonKernelConnection(kernelConnection?: KernelConnectionMetadata): boolean {
     if (!kernelConnection) {
@@ -476,7 +494,7 @@ export function getLanguageInKernelSpec(kernelSpec?: Partial<IJupyterKernelSpec>
  * This helps us easily identify such kernels.
  * WARNING: Never change this, this is stored in ipynb & kernelspec.json.
  */
-const autoGeneratedKernelNameIdentifier = 'jvsc74a57bd0';
+export const autoGeneratedKernelNameIdentifier = 'jvsc74a57bd0';
 /**
  * The name generated here is tied to the interpreter & is predictable.
  * WARNING: Changes to this will impact `getKernelId()`
@@ -484,23 +502,14 @@ const autoGeneratedKernelNameIdentifier = 'jvsc74a57bd0';
 export async function getInterpreterKernelSpecName(interpreter?: PythonEnvironment): Promise<string> {
     // Generate a name from a hash of the interpreter
     // Note it must be prefixed with 'python' and the version number.
-    const version = interpreter?.sysVersion ? getTelemetrySafeVersion(interpreter.sysVersion) || '3' : '';
+    const version = getTelemetrySafeVersion(getCachedVersion(interpreter)) || '3';
     const versionWithSafeStrings = version.replace(/\./g, '');
     const prefix = interpreter ? `python${versionWithSafeStrings}` : '';
     return interpreter
         ? `${prefix}${autoGeneratedKernelNameIdentifier}${await getInterpreterHash(interpreter)}`
         : 'python3';
 }
-/**
- * Returns the workspace folder this interpreter is based in or the root if not a virtual env
- */
-export function getInterpreterWorkspaceFolder(
-    interpreter: PythonEnvironment,
-    workspaceService: IWorkspaceService
-): Uri | undefined {
-    const folder = workspaceService.getWorkspaceFolder(interpreter.uri);
-    return folder?.uri || workspaceService.rootFolder;
-}
+
 /**
  * Gets information about the registered kernelspec.
  * Note: When dealing with non-raw kernels, we register kernelspecs in a global location.
@@ -574,7 +583,7 @@ export function areKernelConnectionsEqual(
 }
 // Check if a name is a default python kernel name and pull the version
 export function detectDefaultKernelName(name: string) {
-    const regEx = NamedRegexp('python\\s*(?<version>(\\d+))', 'g');
+    const regEx = new RegExp('python\\s*(?<version>(\\d+))', 'g');
     return regEx.exec(name.toLowerCase());
 }
 
@@ -600,15 +609,17 @@ export type SilentExecutionErrorOptions = {
 };
 
 export async function executeSilently(
-    session: IKernelConnectionSession | Kernel.IKernelConnection,
+    kernelConnection: Kernel.IKernelConnection,
     code: string,
     errorOptions?: SilentExecutionErrorOptions
 ): Promise<nbformat.IOutput[]> {
-    traceVerbose(`Executing silently Code (${session.status}) = ${code.substring(0, 100).splitLines().join('\\n')}`);
+    logger.trace(
+        `Executing silently Code (${kernelConnection.status}) = ${splitLines(code.substring(0, 100)).join('\\n')}`
+    );
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const jupyterLab = require('@jupyterlab/services') as typeof import('@jupyterlab/services');
 
-    const request = session.requestExecute(
+    const request = kernelConnection.requestExecute(
         {
             code: code.replace(/\r\n/g, '\n'),
             silent: false,
@@ -621,7 +632,7 @@ export async function executeSilently(
     const outputs: nbformat.IOutput[] = [];
     request.onIOPub = (msg) => {
         if (jupyterLab.KernelMessage.isStreamMsg(msg)) {
-            traceInfoIfCI(`Got io pub message (stream), ${msg.content.text.substr(0, 100).splitLines().join('\\n')}`);
+            logger.ci(`Got io pub message (stream), ${splitLines(msg.content.text.substr(0, 100)).join('\\n')}`);
             if (
                 outputs.length > 0 &&
                 outputs[outputs.length - 1].output_type === 'stream' &&
@@ -638,7 +649,7 @@ export async function executeSilently(
                 outputs.push(streamOutput);
             }
         } else if (jupyterLab.KernelMessage.isExecuteResultMsg(msg)) {
-            traceInfoIfCI(`Got io pub message (execresult)}`);
+            logger.ci(`Got io pub message (execresult)}`);
             const output: nbformat.IExecuteResult = {
                 data: msg.content.data,
                 execution_count: msg.content.execution_count,
@@ -647,7 +658,7 @@ export async function executeSilently(
             };
             outputs.push(output);
         } else if (jupyterLab.KernelMessage.isDisplayDataMsg(msg)) {
-            traceInfoIfCI(`Got io pub message (displaydata)}`);
+            logger.ci(`Got io pub message (displaydata)}`);
             const output: nbformat.IDisplayData = {
                 data: msg.content.data,
                 metadata: msg.content.metadata,
@@ -655,11 +666,19 @@ export async function executeSilently(
             };
             outputs.push(output);
         } else if (jupyterLab.KernelMessage.isErrorMsg(msg)) {
-            traceInfoIfCI(
+            logger.ci(
                 `Got io pub message (error), ${msg.content.ename},${msg.content.evalue}, ${msg.content.traceback
                     .join()
                     .substring(0, 100)}}`
             );
+            if (errorOptions?.traceErrors) {
+                const errorMessage = `${
+                    errorOptions.traceErrorsMessage || 'Failed to execute (silent) code against the kernel'
+                }, \nCode = ${code}\nError details: `;
+                logger.error(
+                    `${errorMessage} ${msg.content.ename},${msg.content.evalue}, ${msg.content.traceback.join()}`
+                );
+            }
             const output: nbformat.IError = {
                 ename: msg.content.ename,
                 evalue: msg.content.evalue,
@@ -668,21 +687,99 @@ export async function executeSilently(
             };
             outputs.push(output);
         } else {
-            traceInfoIfCI(`Got io pub message (${msg.header.msg_type})`);
+            logger.ci(`Got io pub message (${msg.header.msg_type})`);
         }
     };
     await request.done;
 
-    const codeForLogging = code.substring(0, 100).splitLines().join('\\n');
+    const codeForLogging = splitLines(code.substring(0, 100)).join('\\n');
 
     // Handle any errors logged in the output if needed
     if (errorOptions) {
         handleExecuteSilentErrors(outputs, errorOptions, codeForLogging);
     }
 
-    traceVerbose(`Executing silently Code (completed) = ${codeForLogging} with ${outputs.length} output(s)`);
+    logger.trace(`Executing silently Code (completed) = ${codeForLogging} with ${outputs.length} output(s)`);
 
     return outputs;
+}
+
+export function executeSilentlyAndEmitOutput(
+    kernelConnection: Kernel.IKernelConnection,
+    code: string,
+    onStarted: () => void,
+    onOutput: (output: NotebookCellOutput) => void
+) {
+    code = code.replace(/\r\n/g, '\n');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const jupyterLab = require('@jupyterlab/services') as typeof import('@jupyterlab/services');
+
+    const request = kernelConnection.requestExecute(
+        {
+            code,
+            silent: false,
+            stop_on_error: false,
+            allow_stdin: false,
+            store_history: false
+        },
+        true
+    );
+    const started = once(onStarted);
+    request.onIOPub = (msg) => {
+        started();
+        if (jupyterLab.KernelMessage.isStreamMsg(msg)) {
+            onOutput(
+                cellOutputToVSCCellOutput({
+                    output_type: 'stream',
+                    name: msg.content.name,
+                    text: msg.content.text
+                })
+            );
+        } else if (jupyterLab.KernelMessage.isExecuteResultMsg(msg)) {
+            onOutput(
+                cellOutputToVSCCellOutput({
+                    output_type: 'execute_result',
+                    data: msg.content.data,
+                    metadata: msg.content.metadata,
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    transient: msg.content.transient as any, // NOSONAR
+                    execution_count: msg.content.execution_count
+                })
+            );
+        } else if (jupyterLab.KernelMessage.isDisplayDataMsg(msg)) {
+            onOutput(
+                cellOutputToVSCCellOutput({
+                    output_type: 'display_data',
+                    data: handleTensorBoardDisplayDataOutput(msg.content.data),
+                    metadata: msg.content.metadata,
+                    transient: msg.content.transient
+                })
+            );
+        } else if (jupyterLab.KernelMessage.isUpdateDisplayDataMsg(msg)) {
+            onOutput(
+                cellOutputToVSCCellOutput({
+                    output_type: 'display_data',
+                    data: handleTensorBoardDisplayDataOutput(msg.content.data),
+                    metadata: msg.content.metadata,
+                    transient: msg.content.transient
+                })
+            );
+        } else if (jupyterLab.KernelMessage.isErrorMsg(msg)) {
+            onOutput(
+                cellOutputToVSCCellOutput({
+                    output_type: 'error',
+                    ename: msg.content.ename,
+                    evalue: msg.content.evalue,
+                    traceback: msg.content.traceback
+                })
+            );
+        } else if (jupyterLab.KernelMessage.isExecuteInputMsg(msg) || jupyterLab.KernelMessage.isStatusMsg(msg)) {
+            //
+        } else {
+            logger.warn(`Got unexpected io pub message when executing code sillenty (${msg.header.msg_type})`);
+        }
+    };
+    return request;
 }
 
 function handleExecuteSilentErrors(
@@ -701,9 +798,9 @@ function handleExecuteSilentErrors(
                 .join('\n')}`;
             const fullMessage = `${errorOptions.traceErrorsMessage || ''} ${codeForLogging} ${outputMessage}`;
             if (errorOptions.traceErrors) {
-                traceError(fullMessage);
+                logger.error(fullMessage);
             } else {
-                traceWarning(fullMessage);
+                logger.warn(fullMessage);
             }
 
             // Send telemetry if requested, no traceback for PII
@@ -711,25 +808,4 @@ function handleExecuteSilentErrors(
                 sendTelemetryEvent(errorOptions.telemetryName);
             }
         });
-}
-
-export function serializeKernelConnection(kernelConnection: KernelConnectionMetadata) {
-    if (kernelConnection.interpreter) {
-        return {
-            ...kernelConnection,
-            interpreter: serializePythonEnvironment(kernelConnection.interpreter)!
-        };
-    }
-    return kernelConnection;
-}
-
-export function deserializeKernelConnection(kernelConnection: any): KernelConnectionMetadata {
-    if (kernelConnection.interpreter) {
-        return {
-            ...kernelConnection,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            interpreter: deserializePythonEnvironment(kernelConnection.interpreter as any, '')!
-        };
-    }
-    return kernelConnection;
 }

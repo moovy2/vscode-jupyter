@@ -1,27 +1,29 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-'use strict';
-
 import { inject, injectable } from 'inversify';
-import { CancellationToken, CancellationTokenSource } from 'vscode';
-import { IApplicationShell } from '../../../platform/common/application/types';
-import { createPromiseFromCancellation, Cancellation } from '../../../platform/common/cancellation';
-import { traceError } from '../../../platform/logging';
+import { CancellationToken, CancellationTokenSource, Uri, env, window } from 'vscode';
+import { raceCancellation } from '../../../platform/common/cancellation';
+import { logger } from '../../../platform/logging';
 import { DataScience, Common } from '../../../platform/common/utils/localize';
 import { noop } from '../../../platform/common/utils/misc';
 import { EnvironmentType, PythonEnvironment } from '../../../platform/pythonEnvironments/info';
 import { sendTelemetryEvent, Telemetry } from '../../../telemetry';
 import { JupyterCommands } from '../../../platform/common/constants';
 import { JupyterInstallError } from '../../../platform/errors/jupyterInstallError';
-import { ProductNames } from '../../installer/productNames';
-import { Product, IInstaller, InstallerResponse } from '../../installer/types';
+import { ProductNames } from '../../../platform/interpreter/installer/productNames';
+import { Product, IInstaller, InstallerResponse } from '../../../platform/interpreter/installer/types';
 import { HelpLinks } from '../../../platform/common/constants';
 import { reportAction } from '../../../platform/progress/decorator';
 import { ReportableAction } from '../../../platform/progress/types';
 import { JupyterInterpreterDependencyResponse } from '../types';
 import { IJupyterCommandFactory } from '../types.node';
 import { getComparisonKey } from '../../../platform/vscode-path/resources';
+import {
+    getCachedEnvironment,
+    getEnvironmentType,
+    getPythonEnvDisplayName
+} from '../../../platform/interpreter/helpers';
 
 /**
  * Sorts the given list of products (in place) in the order in which they need to be installed.
@@ -57,7 +59,11 @@ function sortProductsInOrderForInstallation(products: Product[]) {
  * @param {string} [interpreterName]
  * @returns {string}
  */
-export function getMessageForLibrariesNotInstalled(products: Product[], interpreterName?: string): string {
+export function getMessageForLibrariesNotInstalled(products: Product[], interpreter: PythonEnvironment): string {
+    const interpreterName =
+        getPythonEnvDisplayName(interpreter) ||
+        getCachedEnvironment(interpreter)?.environment?.folderUri?.fsPath ||
+        interpreter.uri.fsPath;
     // Even though kernelspec cannot be installed, display it so user knows what is missing.
     const names = products
         .map((product) => ProductNames.get(product))
@@ -69,17 +75,17 @@ export function getMessageForLibrariesNotInstalled(products: Product[], interpre
             return '';
         case 1:
             return interpreterName
-                ? DataScience.libraryRequiredToLaunchJupyterNotInstalledInterpreter().format(interpreterName, names[0])
-                : DataScience.libraryRequiredToLaunchJupyterNotInstalled().format(names[0]);
+                ? DataScience.libraryRequiredToLaunchJupyterNotInstalledInterpreter(interpreterName, names[0])
+                : DataScience.libraryRequiredToLaunchJupyterNotInstalled(names[0]);
         default: {
             const lastItem = names.pop();
             return interpreterName
-                ? DataScience.librariesRequiredToLaunchJupyterNotInstalledInterpreter().format(
+                ? DataScience.librariesRequiredToLaunchJupyterNotInstalledInterpreter(
                       interpreterName,
-                      `${names.join(', ')} ${Common.and()} ${lastItem}`
+                      `${names.join(', ')} ${Common.and} ${lastItem}`
                   )
-                : DataScience.librariesRequiredToLaunchJupyterNotInstalled().format(
-                      `${names.join(', ')} ${Common.and()} ${lastItem}`
+                : DataScience.librariesRequiredToLaunchJupyterNotInstalled(
+                      `${names.join(', ')} ${Common.and} ${lastItem}`
                   );
         }
     }
@@ -105,7 +111,6 @@ export class JupyterInterpreterDependencyService {
      */
     private readonly dependenciesInstalledInInterpreter = new Set<string>();
     constructor(
-        @inject(IApplicationShell) private readonly applicationShell: IApplicationShell,
         @inject(IInstaller) private readonly installer: IInstaller,
         @inject(IJupyterCommandFactory) private readonly commandFactory: IJupyterCommandFactory
     ) {}
@@ -129,7 +134,7 @@ export class JupyterInterpreterDependencyService {
             // If we're dealing with a non-conda environment & pip isn't installed, we can't install anything.
             // Hence prompt to install pip as well.
             const pipInstalledInNonCondaEnvPromise =
-                interpreter.envType === EnvironmentType.Conda
+                getEnvironmentType(interpreter) === EnvironmentType.Conda
                     ? Promise.resolve(undefined)
                     : this.installer.isInstalled(Product.pip, interpreter);
 
@@ -143,23 +148,22 @@ export class JupyterInterpreterDependencyService {
 
             const message = getMessageForLibrariesNotInstalled(
                 pipInstalledInNonCondaEnv === false ? [Product.pip].concat(missingProducts) : missingProducts,
-                interpreter.displayName
+                interpreter
             );
             sendTelemetryEvent(Telemetry.PythonModuleInstall, undefined, {
                 action: 'displayed',
                 moduleName: ProductNames.get(Product.jupyter)!,
-                pythonEnvType: interpreter.envType
+                pythonEnvType: getEnvironmentType(interpreter)
             });
-            sendTelemetryEvent(Telemetry.JupyterNotInstalledErrorShown);
-            const selection = await this.applicationShell.showErrorMessage(
+            const selection = await window.showErrorMessage(
                 message,
                 { modal: true },
-                DataScience.jupyterInstall(),
-                DataScience.selectDifferentJupyterInterpreter()
+                DataScience.jupyterInstall,
+                DataScience.selectDifferentJupyterInterpreter
             );
 
             switch (selection) {
-                case DataScience.jupyterInstall(): {
+                case DataScience.jupyterInstall: {
                     // Ignore kernelspec as it not something that can be installed.
                     // If kernelspec isn't available, then re-install `Jupyter`.
                     if (missingProducts.includes(Product.kernelspec) && !missingProducts.includes(Product.jupyter)) {
@@ -170,23 +174,19 @@ export class JupyterInterpreterDependencyService {
                     sortProductsInOrderForInstallation(productsToInstall);
 
                     let productToInstall = productsToInstall.shift();
-                    const cancellationPromise = createPromiseFromCancellation({
-                        cancelAction: 'resolve',
-                        defaultValue: InstallerResponse.Ignore,
-                        token: tokenSource.token
-                    });
                     while (productToInstall) {
                         // Always pass a cancellation token to `install`, to ensure it waits until the module is installed.
-                        const response = await Promise.race([
+                        const response = await raceCancellation(
+                            tokenSource.token,
+                            InstallerResponse.Ignore,
                             this.installer.install(
                                 productToInstall,
                                 interpreter,
                                 tokenSource,
                                 undefined,
                                 pipInstalledInNonCondaEnv === false
-                            ),
-                            cancellationPromise
-                        ]);
+                            )
+                        );
                         if (response === InstallerResponse.Installed) {
                             productToInstall = productsToInstall.shift();
                             continue;
@@ -200,13 +200,13 @@ export class JupyterInterpreterDependencyService {
                     return this.checkKernelSpecAvailability(interpreter);
                 }
 
-                case DataScience.selectDifferentJupyterInterpreter(): {
+                case DataScience.selectDifferentJupyterInterpreter: {
                     sendTelemetryEvent(Telemetry.UserDidNotInstallJupyter);
                     return JupyterInterpreterDependencyResponse.selectAnotherInterpreter;
                 }
 
-                case DataScience.pythonInteractiveHelpLink(): {
-                    this.applicationShell.openUrl(HelpLinks.PythonInteractiveHelpLink);
+                case DataScience.pythonInteractiveHelpLink: {
+                    void env.openExternal(Uri.parse(HelpLinks.PythonInteractiveHelpLink));
                     sendTelemetryEvent(Telemetry.UserDidNotInstallJupyter);
                     return JupyterInterpreterDependencyResponse.cancel;
                 }
@@ -250,7 +250,8 @@ export class JupyterInterpreterDependencyService {
 
         const notInstalled: Product[] = [];
 
-        await Promise.race([
+        await raceCancellation(
+            token,
             Promise.all([
                 this.installer
                     .isInstalled(Product.jupyter, interpreter)
@@ -258,14 +259,13 @@ export class JupyterInterpreterDependencyService {
                 this.installer
                     .isInstalled(Product.notebook, interpreter)
                     .then((installed) => (installed ? noop() : notInstalled.push(Product.notebook)))
-            ]),
-            createPromiseFromCancellation<void>({ cancelAction: 'resolve', defaultValue: undefined, token })
-        ]);
+            ])
+        );
 
         if (notInstalled.length > 0) {
             return notInstalled;
         }
-        if (Cancellation.isCanceled(token)) {
+        if (token?.isCancellationRequested) {
             return [];
         }
         // Perform this check only if jupyter & notebook modules are installed.
@@ -298,8 +298,7 @@ export class JupyterInterpreterDependencyService {
             .exec(['--version'], { throwOnStdErr: true })
             .then(() => true)
             .catch((e) => {
-                traceError(`Kernel spec not found: `, e);
-                sendTelemetryEvent(Telemetry.KernelSpecNotFound);
+                logger.error(`Kernel spec not found: `, e);
                 return false;
             });
     }
@@ -323,16 +322,15 @@ export class JupyterInterpreterDependencyService {
             return JupyterInterpreterDependencyResponse.ok;
         }
         // Indicate no kernel spec module.
-        sendTelemetryEvent(Telemetry.JupyterInstalledButNotKernelSpecModule);
-        if (Cancellation.isCanceled(token)) {
+        if (token?.isCancellationRequested) {
             return JupyterInterpreterDependencyResponse.cancel;
         }
-        const selectionFromError = await this.applicationShell.showErrorMessage(
-            DataScience.jupyterKernelSpecModuleNotFound().format(interpreter.uri.fsPath),
+        const selectionFromError = await window.showErrorMessage(
+            DataScience.jupyterKernelSpecModuleNotFound(interpreter.uri.fsPath),
             { modal: true },
-            DataScience.selectDifferentJupyterInterpreter()
+            DataScience.selectDifferentJupyterInterpreter
         );
-        return selectionFromError === DataScience.selectDifferentJupyterInterpreter()
+        return selectionFromError === DataScience.selectDifferentJupyterInterpreter
             ? JupyterInterpreterDependencyResponse.selectAnotherInterpreter
             : JupyterInterpreterDependencyResponse.cancel;
     }
